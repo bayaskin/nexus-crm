@@ -1,0 +1,1 @@
+Migration scripts live in versions/. Generate with alembic revision --autogenerate -m "initial CRM schema" and apply with alembic upgrade head.
