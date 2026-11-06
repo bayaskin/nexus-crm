@@ -1,22 +1,31 @@
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 
+from app.api.routes.auth import router as auth_router
+from app.api.routes.users import router as users_router
+from app.api.routes.customers import router as customers_router
 from app.core.config import settings
 from app.core.database import check_database
 
 app = FastAPI(
     title="Nexus CRM API",
-    version="0.1.0",
-    description="CRM, order management, and inventory platform",
+    version="0.2.0",
+    description="CRM, order management, inventory, authentication and RBAC platform",
+    root_path="/api",
 )
 
 app.add_middleware(
     CORSMiddleware,
     allow_origins=settings.allowed_origins,
     allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
+    allow_headers=["Authorization", "Content-Type"],
 )
+
+app.include_router(auth_router)
+app.include_router(users_router)
+app.include_router(auth_router)
+app.include_router(customers_router)
 
 
 @app.get("/health", tags=["operations"])
@@ -33,6 +42,6 @@ def readiness() -> dict[str, str]:
     return {"status": "ready", "database": "connected"}
 
 
-@app.get("/api/v1", tags=["operations"])
+@app.get("/v1", tags=["operations"])
 def api_root() -> dict[str, str]:
     return {"name": "Nexus CRM API", "version": "v1", "status": "development"}

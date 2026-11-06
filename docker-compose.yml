@@ -36,6 +36,9 @@ services:
       APP_ENV: ${APP_ENV:-development}
       DATABASE_URL: mysql+pymysql://${MYSQL_USER:-nexus}:${MYSQL_PASSWORD:-nexus_dev_password}@mysql:3306/${MYSQL_DATABASE:-nexus_crm}
       CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost:8080}
+      JWT_SECRET_KEY: ${JWT_SECRET_KEY}
+      ACCESS_TOKEN_MINUTES: ${ACCESS_TOKEN_MINUTES:-15}
+      REFRESH_TOKEN_DAYS: ${REFRESH_TOKEN_DAYS:-14}
     expose: ["8000"]
     depends_on:
       mysql:
@@ -98,6 +101,9 @@ services:
       context: ./automation/api
     environment:
       BASE_URL: http://api:8000
+      TEST_USER_EMAIL: ${TEST_USER_EMAIL:-}
+      TEST_USER_PASSWORD: ${TEST_USER_PASSWORD:-}
+      TEST_RBAC_PASSWORD: ${TEST_RBAC_PASSWORD:-}
     depends_on:
       api:
         condition: service_healthy
