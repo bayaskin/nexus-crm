@@ -5,6 +5,8 @@ import uuid
 import httpx
 import pytest
 
+from concurrent.futures import ThreadPoolExecutor
+
 BASE_URL = os.getenv("BASE_URL", "http://localhost:8000")
 TEST_USER_EMAIL = os.getenv("TEST_USER_EMAIL")
 TEST_USER_PASSWORD = os.getenv("TEST_USER_PASSWORD")
@@ -126,6 +128,34 @@ def create_role_headers(role_name: str, admin_headers: dict) -> dict:
 
     token = login(email, TEST_RBAC_PASSWORD)
     return {"Authorization": f"Bearer {token}"}
+
+
+def get_stock_from_database(product_id: str) -> int:
+    import pymysql
+
+    connection = pymysql.connect(
+        host=os.getenv("DB_HOST", "mysql"),
+        port=int(os.getenv("DB_PORT", "3306")),
+        user=os.environ["DB_USER"],
+        password=os.environ["DB_PASSWORD"],
+        database=os.environ["DB_NAME"],
+    )
+
+    try:
+        with connection.cursor() as cursor:
+            cursor.execute(
+                """
+                SELECT quantity_on_hand
+                FROM inventory_balances
+                WHERE product_id = %s
+                """,
+                (product_id,),
+            )
+            row = cursor.fetchone()
+            assert row is not None, f"No inventory balance for {product_id}"
+            return row[0]
+    finally:
+        connection.close()
 
 
 def test_create_draft_order_with_multiple_products(
@@ -526,3 +556,289 @@ def test_sales_representative_can_create_but_cannot_update(
     )
 
     assert update_response.status_code == 403
+
+
+
+def adjust_stock(headers: dict, product_id: str, quantity: int) -> httpx.Response:
+    return httpx.post(
+        f"{BASE_URL}/v1/inventory/adjustments",
+        headers=headers,
+        json={
+            "product_id": product_id,
+            "quantity_change": quantity,
+            "reason": "correction",
+        },
+        timeout=TIMEOUT,
+    )
+
+
+def get_stock(headers: dict, product_id: str) -> int:
+    response = httpx.get(
+        f"{BASE_URL}/v1/inventory/{product_id}",
+        headers=headers,
+        timeout=TIMEOUT,
+    )
+    assert response.status_code == 200, response.text
+    return response.json()["quantity_on_hand"]
+
+
+def order_action(
+    headers: dict,
+    order_id: str,
+    action: str,
+) -> httpx.Response:
+    return httpx.post(
+        f"{BASE_URL}/v1/orders/{order_id}/{action}",
+        headers=headers,
+        timeout=TIMEOUT,
+    )
+
+
+def create_single_item_order(
+    headers: dict,
+    customer_id: str,
+    product_id: str,
+    quantity: int = 1,
+) -> dict:
+    response = create_order(
+        headers,
+        customer_id,
+        [{"product_id": product_id, "quantity": quantity}],
+    )
+    assert response.status_code == 201, response.text
+    return response.json()
+
+
+def test_confirm_order_deducts_inventory(
+    admin_headers, customer, product
+):
+    receipt = adjust_stock(admin_headers, product["id"], 20)
+    assert receipt.status_code == 201, receipt.text
+
+    order = create_single_item_order(
+        admin_headers, customer["id"], product["id"], 5
+    )
+
+    response = order_action(admin_headers, order["id"], "confirm")
+
+    assert response.status_code == 200, response.text
+    assert response.json()["status"] == "confirmed"
+    assert get_stock(admin_headers, product["id"]) == 15
+
+
+def test_confirm_order_with_insufficient_stock_changes_nothing(
+    admin_headers, customer, product
+):
+    receipt = adjust_stock(admin_headers, product["id"], 3)
+    assert receipt.status_code == 201, receipt.text
+
+    order = create_single_item_order(
+        admin_headers, customer["id"], product["id"], 5
+    )
+
+    response = order_action(admin_headers, order["id"], "confirm")
+
+    assert response.status_code == 409
+    assert get_stock(admin_headers, product["id"]) == 3
+
+    detail = httpx.get(
+        f"{BASE_URL}/v1/orders/{order['id']}",
+        headers=admin_headers,
+        timeout=TIMEOUT,
+    )
+    assert detail.status_code == 200
+    assert detail.json()["status"] == "draft"
+
+
+def test_confirm_order_is_not_allowed_twice(
+    admin_headers, customer, product
+):
+    receipt = adjust_stock(admin_headers, product["id"], 10)
+    assert receipt.status_code == 201, receipt.text
+
+    order = create_single_item_order(
+        admin_headers, customer["id"], product["id"], 4
+    )
+
+    first = order_action(admin_headers, order["id"], "confirm")
+    assert first.status_code == 200, first.text
+
+    second = order_action(admin_headers, order["id"], "confirm")
+    assert second.status_code == 409
+
+    assert get_stock(admin_headers, product["id"]) == 6
+
+
+def test_multi_product_confirmation_is_atomic(
+    admin_headers, customer, product, second_product
+):
+    first_receipt = adjust_stock(admin_headers, product["id"], 10)
+    second_receipt = adjust_stock(admin_headers, second_product["id"], 1)
+
+    assert first_receipt.status_code == 201, first_receipt.text
+    assert second_receipt.status_code == 201, second_receipt.text
+
+    order = create_order(
+        admin_headers,
+        customer["id"],
+        [
+            {"product_id": product["id"], "quantity": 5},
+            {"product_id": second_product["id"], "quantity": 2},
+        ],
+    )
+    assert order.status_code == 201, order.text
+
+    response = order_action(
+        admin_headers, order.json()["id"], "confirm"
+    )
+
+    assert response.status_code == 409
+    assert get_stock(admin_headers, product["id"]) == 10
+    assert get_stock(admin_headers, second_product["id"]) == 1
+
+
+def test_ship_and_deliver_order(
+    admin_headers, customer, product
+):
+    receipt = adjust_stock(admin_headers, product["id"], 10)
+    assert receipt.status_code == 201, receipt.text
+
+    order = create_single_item_order(
+        admin_headers, customer["id"], product["id"], 2
+    )
+
+    confirm = order_action(admin_headers, order["id"], "confirm")
+    assert confirm.status_code == 200, confirm.text
+    assert confirm.json()["status"] == "confirmed"
+
+    ship = order_action(admin_headers, order["id"], "ship")
+    assert ship.status_code == 200, ship.text
+    assert ship.json()["status"] == "shipped"
+
+    deliver = order_action(admin_headers, order["id"], "deliver")
+    assert deliver.status_code == 200, deliver.text
+    assert deliver.json()["status"] == "delivered"
+
+    assert get_stock(admin_headers, product["id"]) == 8
+
+
+def test_cancel_draft_order_does_not_change_inventory(
+    admin_headers, customer, product
+):
+    receipt = adjust_stock(admin_headers, product["id"], 10)
+    assert receipt.status_code == 201, receipt.text
+
+    order = create_single_item_order(
+        admin_headers, customer["id"], product["id"], 3
+    )
+
+    response = order_action(admin_headers, order["id"], "cancel")
+
+    assert response.status_code == 200, response.text
+    assert response.json()["status"] == "cancelled"
+    assert get_stock(admin_headers, product["id"]) == 10
+
+
+def test_cancel_confirmed_order_restores_inventory(
+    admin_headers, customer, product
+):
+    receipt = adjust_stock(admin_headers, product["id"], 10)
+    assert receipt.status_code == 201, receipt.text
+
+    order = create_single_item_order(
+        admin_headers, customer["id"], product["id"], 4
+    )
+
+    confirm = order_action(admin_headers, order["id"], "confirm")
+    assert confirm.status_code == 200, confirm.text
+    assert get_stock(admin_headers, product["id"]) == 6
+
+    cancel = order_action(admin_headers, order["id"], "cancel")
+
+    assert cancel.status_code == 200, cancel.text
+    assert cancel.json()["status"] == "cancelled"
+    assert get_stock(admin_headers, product["id"]) == 10
+
+
+@pytest.mark.parametrize("final_action", ["ship", "deliver"])
+def test_cannot_cancel_order_after_shipping(
+    admin_headers, customer, product, final_action
+):
+    receipt = adjust_stock(admin_headers, product["id"], 10)
+    assert receipt.status_code == 201, receipt.text
+
+    order = create_single_item_order(
+        admin_headers, customer["id"], product["id"], 2
+    )
+
+    confirm = order_action(admin_headers, order["id"], "confirm")
+    assert confirm.status_code == 200, confirm.text
+
+    ship = order_action(admin_headers, order["id"], "ship")
+    assert ship.status_code == 200, ship.text
+
+    if final_action == "deliver":
+        deliver = order_action(admin_headers, order["id"], "deliver")
+        assert deliver.status_code == 200, deliver.text
+
+    cancel = order_action(admin_headers, order["id"], "cancel")
+
+    assert cancel.status_code == 409
+    assert get_stock(admin_headers, product["id"]) == 8
+
+
+def test_cancel_confirmed_order_restores_stock_for_inactive_product(
+    admin_headers, customer, product
+):
+    receipt = adjust_stock(admin_headers, product["id"], 10)
+    assert receipt.status_code == 201, receipt.text
+
+    order = create_single_item_order(
+        admin_headers, customer["id"], product["id"], 4
+    )
+
+    confirm = order_action(admin_headers, order["id"], "confirm")
+    assert confirm.status_code == 200, confirm.text
+    assert get_stock(admin_headers, product["id"]) == 6
+
+    deactivate = httpx.post(
+        f"{BASE_URL}/v1/products/{product['id']}/deactivate",
+        headers=admin_headers,
+        timeout=TIMEOUT,
+    )
+    assert deactivate.status_code == 200, deactivate.text
+
+    cancel = order_action(admin_headers, order["id"], "cancel")
+
+    assert cancel.status_code == 200, cancel.text
+    assert cancel.json()["status"] == "cancelled"
+    assert get_stock_from_database(product["id"]) == 10
+
+
+def test_concurrent_confirmation_deducts_inventory_only_once(
+    admin_headers, customer, product
+):
+    receipt = adjust_stock(admin_headers, product["id"], 10)
+    assert receipt.status_code == 201, receipt.text
+
+    order = create_single_item_order(
+        admin_headers, customer["id"], product["id"], 7
+    )
+
+    def confirm():
+        return order_action(admin_headers, order["id"], "confirm")
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        futures = [
+            executor.submit(confirm),
+            executor.submit(confirm),
+        ]
+        responses = [future.result() for future in futures]
+
+    assert sorted(response.status_code for response in responses) == [
+        200,
+        409,
+    ]
+    assert get_stock(admin_headers, product["id"]) == 3
+
+

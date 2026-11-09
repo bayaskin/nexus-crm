@@ -14,7 +14,15 @@ from app.schemas.orders import (
     OrderResponse,
     OrderUpdate,
 )
-from app.services.orders import create_order, get_order, update_order
+from app.services.orders import (
+    cancel_order,
+    confirm_order,
+    create_order,
+    deliver_order,
+    get_order,
+    ship_order,
+    update_order,
+)
 
 router = APIRouter(prefix="/v1/orders", tags=["orders"])
 
@@ -106,3 +114,39 @@ def update_order_endpoint(
     _actor: User = Depends(require_permission("orders", "update")),
 ):
     return update_order(db, order_id, payload)
+
+
+@router.post("/{order_id}/confirm", response_model=OrderResponse)
+def confirm_order_endpoint(
+    order_id: UUID,
+    db: Session = Depends(get_db),
+    _actor: User = Depends(require_permission("orders", "update")),
+):
+    return confirm_order(db, order_id)
+
+
+@router.post("/{order_id}/ship", response_model=OrderResponse)
+def ship_order_endpoint(
+    order_id: UUID,
+    db: Session = Depends(get_db),
+    _actor: User = Depends(require_permission("orders", "update")),
+):
+    return ship_order(db, order_id)
+
+
+@router.post("/{order_id}/deliver", response_model=OrderResponse)
+def deliver_order_endpoint(
+    order_id: UUID,
+    db: Session = Depends(get_db),
+    _actor: User = Depends(require_permission("orders", "update")),
+):
+    return deliver_order(db, order_id)
+
+
+@router.post("/{order_id}/cancel", response_model=OrderResponse)
+def cancel_order_endpoint(
+    order_id: UUID,
+    db: Session = Depends(get_db),
+    _actor: User = Depends(require_permission("orders", "update")),
+):
+    return cancel_order(db, order_id)
