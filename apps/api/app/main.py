@@ -5,6 +5,7 @@ from app.api.routes.auth import router as auth_router
 from app.api.routes.users import router as users_router
 from app.api.routes.customers import router as customers_router
 from app.api.routes.products import router as products_router
+from app.api.routes.inventory import router as inventory_router
 from app.core.config import settings
 from app.core.database import check_database
 
@@ -26,8 +27,8 @@ app.add_middleware(
 app.include_router(auth_router)
 app.include_router(users_router)
 app.include_router(customers_router)
-app.include_router(customers_router)
 app.include_router(products_router)
+app.include_router(inventory_router)
 
 
 @app.get("/health", tags=["operations"])

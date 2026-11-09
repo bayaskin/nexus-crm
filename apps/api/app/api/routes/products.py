@@ -15,6 +15,7 @@ from app.schemas.products import (
     ProductResponse,
     ProductUpdate,
 )
+from app.models.inventory import InventoryBalance, Warehouse
 
 router = APIRouter(prefix="/v1/products", tags=["products"])
 
@@ -98,10 +99,32 @@ def create_product(
     db.add(product)
 
     try:
+        db.flush()
+
+        warehouse = db.scalar(
+            select(Warehouse).where(Warehouse.code == "MAIN")
+        )
+
+        if warehouse is None:
+            raise RuntimeError("Main warehouse is not configured")
+
+        db.add(
+            InventoryBalance(
+                warehouse_id=warehouse.id,
+                product_id=product.id,
+                quantity_on_hand=0,
+                reorder_level=0,
+            )
+        )
+
         db.commit()
+
     except IntegrityError:
         db.rollback()
         raise_duplicate_sku()
+    except Exception:
+        db.rollback()
+        raise
 
     db.refresh(product)
     return product
