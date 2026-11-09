@@ -101,13 +101,18 @@ services:
       context: ./automation/api
     environment:
       BASE_URL: http://api:8000
+      DB_HOST: mysql
+      DB_PORT: "3306"
+      DB_USER: ${MYSQL_USER}
+      DB_PASSWORD: ${MYSQL_PASSWORD}
+      DB_NAME: ${MYSQL_DATABASE}
       TEST_USER_EMAIL: ${TEST_USER_EMAIL:-}
       TEST_USER_PASSWORD: ${TEST_USER_PASSWORD:-}
       TEST_RBAC_PASSWORD: ${TEST_RBAC_PASSWORD:-}
     depends_on:
       api:
         condition: service_healthy
-    networks: [nexus]
+    networks: [nexus, data]
 
 volumes:
   mysql_data:

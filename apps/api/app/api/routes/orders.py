@@ -22,6 +22,7 @@ from app.services.orders import (
     get_order,
     ship_order,
     update_order,
+    remove_order_item,
 )
 
 router = APIRouter(prefix="/v1/orders", tags=["orders"])
@@ -114,6 +115,19 @@ def update_order_endpoint(
     _actor: User = Depends(require_permission("orders", "update")),
 ):
     return update_order(db, order_id, payload)
+
+
+@router.delete(
+    "/{order_id}/items/{product_id}",
+    response_model=OrderResponse,
+)
+def remove_order_item_endpoint(
+    order_id: UUID,
+    product_id: UUID,
+    db: Session = Depends(get_db),
+    _actor: User = Depends(require_permission("orders", "update")),
+):
+    return remove_order_item(db, order_id, product_id)
 
 
 @router.post("/{order_id}/confirm", response_model=OrderResponse)

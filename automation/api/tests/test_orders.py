@@ -149,11 +149,12 @@ def get_stock_from_database(product_id: str) -> int:
                 FROM inventory_balances
                 WHERE product_id = %s
                 """,
-                (product_id,),
+                (product_id.replace("-", ""),),
             )
             row = cursor.fetchone()
+
             assert row is not None, f"No inventory balance for {product_id}"
-            return row[0]
+            return int(row[0])
     finally:
         connection.close()
 
@@ -842,3 +843,169 @@ def test_concurrent_confirmation_deducts_inventory_only_once(
     assert get_stock(admin_headers, product["id"]) == 3
 
 
+
+def test_remove_order_item_recalculates_total_and_preserves_price_snapshot(
+    admin_headers,
+    customer,
+    product,
+    second_product,
+):
+    created = create_order(
+        admin_headers,
+        customer["id"],
+        [
+            {"product_id": product["id"], "quantity": 2},
+            {"product_id": second_product["id"], "quantity": 3},
+        ],
+    )
+
+    assert created.status_code == 201, created.text
+    order = created.json()
+
+    # Change the current catalog price after the order is created.
+    price_update = httpx.patch(
+        f"{BASE_URL}/v1/products/{second_product['id']}",
+        headers=admin_headers,
+        json={"price": "99.00"},
+        timeout=TIMEOUT,
+    )
+    assert price_update.status_code == 200, price_update.text
+
+    response = httpx.delete(
+        f"{BASE_URL}/v1/orders/{order['id']}/items/{product['id']}",
+        headers=admin_headers,
+        timeout=TIMEOUT,
+    )
+
+    assert response.status_code == 200, response.text
+
+    updated = response.json()
+
+    assert updated["status"] == "draft"
+    assert updated["total"] == "88.50"
+    assert len(updated["items"]) == 1
+
+    remaining = updated["items"][0]
+    assert remaining["product_id"] == second_product["id"]
+    assert remaining["quantity"] == 3
+    assert remaining["unit_price"] == "29.50"
+    assert remaining["line_total"] == "88.50"
+
+
+def test_remove_missing_product_from_order_returns_404(
+    admin_headers,
+    customer,
+    product,
+    second_product,
+):
+    created = create_order(
+        admin_headers,
+        customer["id"],
+        [{"product_id": product["id"], "quantity": 1}],
+    )
+
+    assert created.status_code == 201, created.text
+
+    response = httpx.delete(
+        f"{BASE_URL}/v1/orders/{created.json()['id']}/items/{second_product['id']}",
+        headers=admin_headers,
+        timeout=TIMEOUT,
+    )
+
+    assert response.status_code == 404
+
+
+def test_cannot_remove_last_order_item(
+    admin_headers,
+    customer,
+    product,
+):
+    created = create_order(
+        admin_headers,
+        customer["id"],
+        [{"product_id": product["id"], "quantity": 2}],
+    )
+
+    assert created.status_code == 201, created.text
+    order_id = created.json()["id"]
+
+    response = httpx.delete(
+        f"{BASE_URL}/v1/orders/{order_id}/items/{product['id']}",
+        headers=admin_headers,
+        timeout=TIMEOUT,
+    )
+
+    assert response.status_code == 409
+
+    unchanged = httpx.get(
+        f"{BASE_URL}/v1/orders/{order_id}",
+        headers=admin_headers,
+        timeout=TIMEOUT,
+    )
+
+    assert unchanged.status_code == 200
+    assert unchanged.json()["status"] == "draft"
+    assert len(unchanged.json()["items"]) == 1
+    assert unchanged.json()["total"] == "39.98"
+
+
+
+def test_cannot_remove_item_from_confirmed_order(
+    admin_headers,
+    customer,
+    product,
+    second_product,
+):
+    # Receive stock through the public inventory API.
+    for product_id in (product["id"], second_product["id"]):
+        receipt = httpx.post(
+            f"{BASE_URL}/v1/inventory/adjustments",
+            headers=admin_headers,
+            json={
+                "product_id": product_id,
+                "quantity_change": 10,
+                "reason": "purchase_receipt",
+            },
+            timeout=TIMEOUT,
+        )
+        assert receipt.status_code == 201, receipt.text
+
+    created = create_order(
+        admin_headers,
+        customer["id"],
+        [
+            {"product_id": product["id"], "quantity": 1},
+            {"product_id": second_product["id"], "quantity": 1},
+        ],
+    )
+
+    assert created.status_code == 201, created.text
+    order = created.json()
+
+    confirm = httpx.post(
+        f"{BASE_URL}/v1/orders/{order['id']}/confirm",
+        headers=admin_headers,
+        timeout=TIMEOUT,
+    )
+
+    assert confirm.status_code == 200, confirm.text
+    assert confirm.json()["status"] == "confirmed"
+
+    response = httpx.delete(
+        f"{BASE_URL}/v1/orders/{order['id']}/items/{product['id']}",
+        headers=admin_headers,
+        timeout=TIMEOUT,
+    )
+
+    assert response.status_code == 409
+
+    unchanged = httpx.get(
+        f"{BASE_URL}/v1/orders/{order['id']}",
+        headers=admin_headers,
+        timeout=TIMEOUT,
+    )
+
+    assert unchanged.status_code == 200
+    assert unchanged.json()["status"] == "confirmed"
+    assert len(unchanged.json()["items"]) == 2
+    assert unchanged.json()["total"] == order["total"]

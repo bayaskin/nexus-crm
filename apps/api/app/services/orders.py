@@ -182,6 +182,64 @@ def update_order(
         raise
 
 
+def remove_order_item(
+    db: Session,
+    order_id: UUID,
+    product_id: UUID,
+) -> Order:
+    try:
+        order = get_locked_order(db, order_id)
+
+        if order.status != "draft":
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="Only draft orders can be edited",
+            )
+
+        # Load items after locking the order row.
+        items = list(order.items)
+
+        target_item = next(
+            (item for item in items if item.product_id == product_id),
+            None,
+        )
+
+        if target_item is None:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Product not found in this order",
+            )
+
+        if len(items) == 1:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail=(
+                    "An order must contain at least one item. "
+                    "Cancel the order instead."
+                ),
+            )
+
+        # Remove only the selected line item.
+        # Remaining unit_price values are never recalculated.
+        order.items.remove(target_item)
+
+        order.total = sum(
+            (
+                item.unit_price * item.quantity
+                for item in order.items
+            ),
+            Decimal("0.00"),
+        )
+
+        db.commit()
+
+        return get_order(db, order.id)
+
+    except Exception:
+        db.rollback()
+        raise
+
+
 def get_main_warehouse(db: Session) -> Warehouse:
     warehouse = db.scalar(
         select(Warehouse).where(
@@ -295,15 +353,21 @@ def confirm_order(db: Session, order_id: UUID) -> Order:
         # Validate every item before mutating any balance.
         for item, balance in locked_items:
             if balance.quantity_on_hand < item.quantity:
+                product = db.get(Product, item.product_id)
+
                 raise HTTPException(
                     status_code=status.HTTP_409_CONFLICT,
-                    detail=(
-                        f"Insufficient stock for product {item.product_id}. "
-                        f"Available: {balance.quantity_on_hand}, "
-                        f"requested: {item.quantity}"
-                    ),
+                    detail={
+                        "code": "insufficient_stock",
+                        "message": "Insufficient stock",
+                        "product_id": str(item.product_id),
+                        "sku": product.sku if product else "Unknown SKU",
+                        "product_name": product.name if product else "Unknown product",
+                        "available": balance.quantity_on_hand,
+                        "requested": item.quantity,
+                    },
                 )
-
+                    
         # All stock is available. Apply deductions and movements.
         for item, balance in locked_items:
             balance.quantity_on_hand -= item.quantity
