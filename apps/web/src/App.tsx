@@ -15,6 +15,8 @@ import LoginPage from "./pages/LoginPage";
 import OrdersPage from "./pages/OrdersPage";
 import CreateOrderPage from "./pages/CreateOrderPage";
 import OrderDetailsPage from "./pages/OrderDetailsPage";
+import CustomersPage from "./pages/CustomersPage";
+import CustomerDetailsPage from "./pages/CustomerDetailsPage";
 
 function OverviewPage() {
   const { user, can } = useAuth();
@@ -90,6 +92,23 @@ function ProtectedRoutes() {
           element={
             <PermissionRoute permission="orders:read">
               <OrdersPage />
+            </PermissionRoute>
+          }
+        />
+        <Route
+          path="/customers"
+          element={
+            <PermissionRoute permission="customers:read">
+              <CustomersPage />
+            </PermissionRoute>
+          }
+        />
+
+        <Route
+          path="/customers/:customerId"
+          element={
+            <PermissionRoute permission="customers:read">
+              <CustomerDetailsPage />
             </PermissionRoute>
           }
         />

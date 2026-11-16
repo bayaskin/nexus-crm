@@ -11,6 +11,7 @@ from app.models.identity import User
 from app.schemas.customers import (
     ContactCreate,
     ContactResponse,
+    ContactUpdate,
     CustomerCreate,
     CustomerListResponse,
     CustomerResponse,
@@ -21,8 +22,15 @@ router = APIRouter(prefix="/v1/customers", tags=["customers"])
 
 
 def get_active_customer(db: Session, customer_id: UUID) -> Customer:
-    customer = db.get(Customer, customer_id)
-    if customer is None or not customer.is_active:
+    customer = db.scalar(
+        select(Customer)
+        .where(
+            Customer.id == customer_id,
+            Customer.is_active.is_(True),
+        )
+        .with_for_update()
+    )
+    if customer is None:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Customer not found",
@@ -37,9 +45,14 @@ def list_customers(
     skip: int = Query(default=0, ge=0),
     limit: int = Query(default=20, ge=1, le=100),
     db: Session = Depends(get_db),
+    account_status: str = Query(default="active", pattern="^(active|inactive|all)$"),
     _actor: User = Depends(require_permission("customers", "read")),
 ):
-    filters = [Customer.is_active.is_(True)]
+    filters = []
+    if account_status == "active":
+        filters.append(Customer.is_active.is_(True))
+    elif account_status == "inactive":
+        filters.append(Customer.is_active.is_(False))
 
     if customer_status:
         filters.append(Customer.status == customer_status)
@@ -196,4 +209,71 @@ def create_customer_contact(
     db.add(contact)
     db.commit()
     db.refresh(contact)
+    return contact
+
+
+@router.patch(
+    "/{customer_id}/contacts/{contact_id}",
+    response_model=ContactResponse,
+)
+def update_customer_contact(
+    customer_id: UUID,
+    contact_id: UUID,
+    payload: ContactUpdate,
+    db: Session = Depends(get_db),
+    _actor: User = Depends(require_permission("customers", "update")),
+):
+    customer = db.scalar(
+        select(Customer)
+        .where(
+            Customer.id == customer_id,
+            Customer.is_active.is_(True),
+        )
+        .with_for_update()
+    )
+
+    if customer is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Customer not found",
+        )
+
+    contact = db.scalar(
+        select(Contact)
+        .where(
+            Contact.id == contact_id,
+            Contact.customer_id == customer_id,
+        )
+        .with_for_update()
+    )
+
+    if contact is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Contact not found",
+        )
+
+    changes = payload.model_dump(exclude_unset=True)
+
+    if changes.get("is_primary") is True:
+        existing_primary_contacts = db.scalars(
+            select(Contact)
+            .where(
+                Contact.customer_id == customer_id,
+                Contact.is_primary.is_(True),
+                Contact.id != contact_id,
+            )
+            .with_for_update()
+        ).all()
+
+        for existing in existing_primary_contacts:
+            existing.is_primary = False
+
+    for field, value in changes.items():
+        setattr(contact, field, value)
+
+    if changes:
+        db.commit()
+        db.refresh(contact)
+
     return contact

@@ -106,6 +106,34 @@ class ContactCreate(BaseModel):
         return value.strip() or None if value is not None else None
 
 
+class ContactUpdate(BaseModel):
+    first_name: str | None = Field(default=None, min_length=1, max_length=100)
+    last_name: str | None = Field(default=None, min_length=1, max_length=100)
+    email: EmailStr | None = None
+    phone: str | None = Field(default=None, max_length=40)
+    is_primary: bool | None = None
+
+    @field_validator("first_name", "last_name")
+    @classmethod
+    def validate_required_text(cls, value: str | None) -> str | None:
+        if value is None:
+            raise ValueError("This field cannot be null")
+        value = value.strip()
+        if not value:
+            raise ValueError("Value cannot be blank")
+        return value
+
+    @field_validator("email")
+    @classmethod
+    def normalize_email(cls, value: EmailStr | None) -> EmailStr | None:
+        return value.lower() if value else value
+
+    @field_validator("phone")
+    @classmethod
+    def normalize_phone(cls, value: str | None) -> str | None:
+        return value.strip() or None if value is not None else None
+
+
 class ContactResponse(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 

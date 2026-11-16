@@ -20,6 +20,7 @@ export async function getOrders(
   status?: OrderStatus,
   skip = 0,
   limit = 20,
+  customerId?: string,
 ) {
   const params = new URLSearchParams({
     skip: String(skip),
@@ -27,6 +28,7 @@ export async function getOrders(
   });
 
   if (status) params.set("status", status);
+  if (customerId) params.set("customer_id", customerId);
 
   return apiRequest<PaginatedResponse<Order>>(
     `/v1/orders?${params}`,

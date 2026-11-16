@@ -288,3 +288,141 @@ def test_sales_representative_can_create_but_cannot_update(
         timeout=TIMEOUT,
     )
     assert update_response.status_code == 403
+
+
+def test_create_customer_contact(admin_headers, customer):
+    response = httpx.post(
+        f"{BASE_URL}/v1/customers/{customer['id']}/contacts",
+        headers=admin_headers,
+        json={
+            "first_name": "John",
+            "last_name": "Smith",
+            "email": "JOHN@EXAMPLE.COM",
+            "phone": "312-555-0100",
+            "is_primary": True,
+        },
+        timeout=TIMEOUT,
+    )
+
+    assert response.status_code == 201, response.text
+
+    contact = response.json()
+    assert contact["first_name"] == "John"
+    assert contact["last_name"] == "Smith"
+    assert contact["email"] == "john@example.com"
+    assert contact["is_primary"] is True
+
+
+def test_update_customer_contact(admin_headers, customer):
+    created = httpx.post(
+        f"{BASE_URL}/v1/customers/{customer['id']}/contacts",
+        headers=admin_headers,
+        json={
+            "first_name": "John",
+            "last_name": "Smith",
+            "email": "john@example.com",
+            "phone": "312-555-0100",
+            "is_primary": False,
+        },
+        timeout=TIMEOUT,
+    )
+    assert created.status_code == 201, created.text
+
+    contact_id = created.json()["id"]
+
+    response = httpx.patch(
+        f"{BASE_URL}/v1/customers/{customer['id']}/contacts/{contact_id}",
+        headers=admin_headers,
+        json={
+            "first_name": "Jonathan",
+            "phone": "312-555-0199",
+        },
+        timeout=TIMEOUT,
+    )
+
+    assert response.status_code == 200, response.text
+    assert response.json()["first_name"] == "Jonathan"
+    assert response.json()["phone"] == "312-555-0199"
+    assert response.json()["email"] == "john@example.com"
+
+
+def test_updating_primary_contact_unsets_previous_primary(
+    admin_headers, customer
+):
+    contact_ids = []
+
+    for first_name in ("John", "Sarah"):
+        response = httpx.post(
+            f"{BASE_URL}/v1/customers/{customer['id']}/contacts",
+            headers=admin_headers,
+            json={
+                "first_name": first_name,
+                "last_name": "Smith",
+                "is_primary": first_name == "John",
+            },
+            timeout=TIMEOUT,
+        )
+        assert response.status_code == 201, response.text
+        contact_ids.append(response.json()["id"])
+
+    response = httpx.patch(
+        f"{BASE_URL}/v1/customers/{customer['id']}/contacts/{contact_ids[1]}",
+        headers=admin_headers,
+        json={"is_primary": True},
+        timeout=TIMEOUT,
+    )
+
+    assert response.status_code == 200, response.text
+
+    contacts = httpx.get(
+        f"{BASE_URL}/v1/customers/{customer['id']}/contacts",
+        headers=admin_headers,
+        timeout=TIMEOUT,
+    )
+    assert contacts.status_code == 200, contacts.text
+
+    primary_contacts = [
+        contact for contact in contacts.json() if contact["is_primary"]
+    ]
+
+    assert len(primary_contacts) == 1
+    assert primary_contacts[0]["id"] == contact_ids[1]
+
+
+def test_update_contact_from_another_customer_returns_404(
+    admin_headers, customer
+):
+    created = httpx.post(
+        f"{BASE_URL}/v1/customers/{customer['id']}/contacts",
+        headers=admin_headers,
+        json={
+            "first_name": "John",
+            "last_name": "Smith",
+        },
+        timeout=TIMEOUT,
+    )
+    assert created.status_code == 201, created.text
+
+    second_customer_response = httpx.post(
+        f"{BASE_URL}/v1/customers",
+        headers=admin_headers,
+        json={
+            "name": "Second Test Customer",
+            "email": "second-customer@example.com",
+            "status": "active",
+        },
+        timeout=TIMEOUT,
+    )
+    assert second_customer_response.status_code == 201, second_customer_response.text
+
+    second_customer_id = second_customer_response.json()["id"]
+
+    response = httpx.patch(
+        f"{BASE_URL}/v1/customers/{second_customer_id}/contacts/{created.json()['id']}",
+        headers=admin_headers,
+        json={"first_name": "Unauthorized"},
+        timeout=TIMEOUT,
+    )
+
+    assert response.status_code == 404
+    assert response.json()["detail"] == "Contact not found"

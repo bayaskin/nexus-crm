@@ -22,7 +22,10 @@ export interface Customer {
   email: string | null;
   phone: string | null;
   status: string;
+  notes: string | null;
   is_active: boolean;
+  created_at: string;
+  updated_at: string;
 }
 
 export interface Product {

@@ -89,6 +89,8 @@ services:
       context: ./automation/ui
     environment:
       BASE_URL: http://proxy
+      TEST_USER_EMAIL: ${TEST_USER_EMAIL}
+      TEST_USER_PASSWORD: ${TEST_USER_PASSWORD}
     depends_on:
       proxy:
         condition: service_started
@@ -113,6 +115,8 @@ services:
       api:
         condition: service_healthy
     networks: [nexus, data]
+    volumes:
+      - ./automation/api:/tests
 
 volumes:
   mysql_data:
