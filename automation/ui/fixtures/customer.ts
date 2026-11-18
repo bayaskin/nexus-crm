@@ -3,6 +3,7 @@ import { test as base, expect } from "./auth";
 type CustomerFixtures = {
   customerProfile: {
     name: string;
+    id: string;
   };
 };
 
@@ -33,13 +34,22 @@ export const test = base.extend<CustomerFixtures>({
     await customerRow.getByRole("link", { name: "View" }).click();
 
     await expect(
-      page.getByRole("heading", {
+    page.getByRole("heading", {
         level: 1,
         name: customerName,
-      }),
+    }),
     ).toBeVisible();
 
-    await use({ name: customerName });
+    const customerId = page.url().split("/").pop();
+
+    if (!customerId) {
+      throw new Error("Could not determine created customer ID");
+    }
+
+    await use({
+      id: customerId,
+      name: customerName,
+    });
   },
 });
 
