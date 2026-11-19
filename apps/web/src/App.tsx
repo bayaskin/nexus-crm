@@ -17,6 +17,7 @@ import CreateOrderPage from "./pages/CreateOrderPage";
 import OrderDetailsPage from "./pages/OrderDetailsPage";
 import CustomersPage from "./pages/CustomersPage";
 import CustomerDetailsPage from "./pages/CustomerDetailsPage";
+import InventoryPage from "./pages/InventoryPage";
 
 function OverviewPage() {
   const { user, can } = useAuth();
@@ -92,6 +93,14 @@ function ProtectedRoutes() {
           element={
             <PermissionRoute permission="orders:read">
               <OrdersPage />
+            </PermissionRoute>
+          }
+        />
+        <Route
+          path="/inventory"
+          element={
+            <PermissionRoute permission="inventory:read">
+              <InventoryPage />
             </PermissionRoute>
           }
         />

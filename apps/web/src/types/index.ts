@@ -68,3 +68,40 @@ export interface PaginatedResponse<T> {
   skip: number;
   limit: number;
 }
+
+export interface InventoryBalance {
+  product_id: string;
+  sku: string;
+  product_name: string;
+  warehouse_id: string;
+  warehouse_code: string;
+  quantity_on_hand: number;
+  reorder_level: number;
+  is_low_stock: boolean;
+  updated_at: string;
+}
+
+export type InventoryReason =
+  | "purchase_receipt"
+  | "customer_return"
+  | "damaged"
+  | "lost"
+  | "correction"
+  | "initial_stock"
+  | "other";
+
+export interface InventoryMovement {
+  id: string;
+  warehouse_id: string;
+  product_id: string;
+  quantity_change: number;
+  reason: InventoryReason;
+  reference_id: string | null;
+  notes: string | null;
+  created_at: string;
+}
+
+export interface InventoryAdjustmentResponse {
+  movement: InventoryMovement;
+  balance: InventoryBalance;
+}
