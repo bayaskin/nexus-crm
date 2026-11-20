@@ -85,4 +85,12 @@ Effective access is role grants plus explicit user allows, with explicit user de
 
 The API reads `SMTP_HOST`, `SMTP_PORT`, `SMTP_FROM`, and `APP_LOGIN_URL` from environment configuration. Local Compose starts MailHog at SMTP `mailhog:1025`; view captured messages at http://localhost:8025. Override these variables when using another SMTP service.
 
+## Agentic QA foundation
+
+The first QA foundation exposes authenticated run management at `POST /api/v1/qa/runs`, `GET /api/v1/qa/runs`, `GET /api/v1/qa/runs/{run_id}`, and `POST /api/v1/qa/runs/{run_id}/cancel`. Starting and cancelling runs requires `qa:execute`; listing and viewing runs requires `qa:read`. These permissions are checked by the API. Apply the Alembic migration with `docker compose exec api alembic upgrade head` before using the endpoints.
+
+Runs use the built-in mock provider and need no AI key, GitHub access, test runner, or extra service. A completed foundation run is explicitly marked `foundation_mock`, reports `not_assessed`, and includes a `not_run` test execution summary. It does not analyze a repository, claim test execution, or report simulated findings. The provider and ordered workflow stage interfaces are in the API service layer; test execution results use a generic schema that is not coupled to Allure. There is no QA dashboard or OpenAI integration in this step.
+
+Runs are persisted, but this step uses FastAPI in-process background tasks rather than a durable queue. In-flight work is not resumed after an API restart; stale active records are marked `timed_out` when read or cancelled after their configured progress timeout.
+
 Apply database changes with `docker compose exec api alembic upgrade head`. Run backend contract tests with `docker compose --profile test run --rm api-tests` and UI tests with `docker compose --profile test run --rm ui-tests`.

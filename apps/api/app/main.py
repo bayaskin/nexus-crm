@@ -10,6 +10,7 @@ from app.api.routes.customers import router as customers_router
 from app.api.routes.products import router as products_router
 from app.api.routes.inventory import router as inventory_router
 from app.api.routes.orders import router as orders_router
+from app.api.routes.qa import router as qa_router
 from app.core.config import settings
 from app.core.database import check_database
 
@@ -63,6 +64,7 @@ app.include_router(customers_router)
 app.include_router(products_router)
 app.include_router(inventory_router)
 app.include_router(orders_router)
+app.include_router(qa_router)
 
 
 @app.get("/health", tags=["operations"])
