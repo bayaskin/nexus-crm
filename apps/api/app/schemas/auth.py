@@ -1,12 +1,19 @@
 from datetime import datetime
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict, EmailStr, Field
+from pydantic import BaseModel, ConfigDict, EmailStr, Field, SecretStr, field_validator
 
 
 class LoginRequest(BaseModel):
     email: EmailStr
-    password: str = Field(min_length=1, max_length=256)
+    password: SecretStr
+
+    @field_validator("password")
+    @classmethod
+    def validate_password(cls, value: SecretStr) -> SecretStr:
+        if not 1 <= len(value.get_secret_value()) <= 256:
+            raise ValueError("Password must be 1 to 256 characters")
+        return value
 
 
 class RefreshRequest(BaseModel):
@@ -15,6 +22,25 @@ class RefreshRequest(BaseModel):
 
 class LogoutRequest(BaseModel):
     refresh_token: str = Field(min_length=32, max_length=256)
+
+
+class PasswordChangeRequest(BaseModel):
+    current_password: SecretStr
+    new_password: SecretStr
+
+    @field_validator("current_password")
+    @classmethod
+    def validate_current_password(cls, value: SecretStr) -> SecretStr:
+        if not 1 <= len(value.get_secret_value()) <= 256:
+            raise ValueError("Current password must be 1 to 256 characters")
+        return value
+
+    @field_validator("new_password")
+    @classmethod
+    def validate_new_password(cls, value: SecretStr) -> SecretStr:
+        if not 12 <= len(value.get_secret_value()) <= 128:
+            raise ValueError("New password must be 12 to 128 characters")
+        return value
 
 
 class TokenResponse(BaseModel):
@@ -34,13 +60,21 @@ class UserSummary(BaseModel):
     is_superuser: bool
     roles: list[str]
     permissions: list[str]
+    must_change_password: bool = False
 
 
 class UserCreate(BaseModel):
     email: EmailStr
     full_name: str = Field(min_length=1, max_length=160)
-    password: str = Field(min_length=12, max_length=128)
+    password: SecretStr
     role_names: list[str] = Field(default_factory=list)
+
+    @field_validator("password")
+    @classmethod
+    def validate_password(cls, value: SecretStr) -> SecretStr:
+        if not 12 <= len(value.get_secret_value()) <= 128:
+            raise ValueError("Password must be 12 to 128 characters")
+        return value
 
 
 class UserListItem(BaseModel):

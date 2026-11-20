@@ -9,14 +9,20 @@ from app.models.identity import Permission, Role, User
 
 DEFAULT_PERMISSIONS = [
     ("users", "read"), ("users", "create"), ("users", "update"),
-    ("roles", "read"), ("roles", "assign"),
+    ("users", "deactivate"), ("users", "reset_password"),
+    ("roles", "read"), ("roles", "assign"), ("permissions", "read"), ("permissions", "manage"),
     ("customers", "read"), ("customers", "create"), ("customers", "update"),
     ("products", "read"), ("products", "create"), ("products", "update"),
-    ("inventory", "read"), ("inventory", "adjust"),
-    ("orders", "read"), ("orders", "create"), ("orders", "update"),
+    ("inventory", "read"), ("inventory", "update"), ("inventory", "adjust"),
+    ("orders", "read"), ("orders", "create"), ("orders", "update"), ("orders", "cancel"),
+    ("qa", "read"), ("qa", "execute"), ("reports", "read"),
 ]
 
 ROLE_GRANTS = {
+    "Admin": ["users:read", "users:create", "users:update", "users:deactivate", "users:reset_password", "roles:read", "roles:assign", "permissions:read", "permissions:manage", "customers:read", "customers:create", "customers:update", "products:read", "products:create", "products:update", "inventory:read", "inventory:update", "inventory:adjust", "orders:read", "orders:create", "orders:update", "orders:cancel", "qa:read", "qa:execute", "reports:read"],
+    "Manager": ["customers:read", "customers:create", "customers:update", "products:read", "inventory:read", "inventory:update", "inventory:adjust", "orders:read", "orders:create", "orders:update", "reports:read"],
+    "QA": ["qa:read", "qa:execute", "reports:read"],
+    "User": ["customers:read", "orders:read", "products:read"],
     "Sales Manager": [
         "customers:read", "customers:create", "customers:update",
         "products:read", "inventory:read",
@@ -48,8 +54,6 @@ def main() -> None:
     try:
         email = args.email.strip().lower()
         existing = db.scalar(select(User).where(User.email == email))
-        if existing:
-            raise SystemExit(f"User {email} already exists; no changes made")
 
         permissions = {}
         for resource, action in DEFAULT_PERMISSIONS:
@@ -85,6 +89,13 @@ def main() -> None:
                 permission = permissions[permission_name]
                 if permission not in role.permissions:
                     role.permissions.append(permission)
+
+        # Keep role and permission seeding idempotent even when bootstrapping an
+        # installation that already has its initial administrator.
+        if existing:
+            db.commit()
+            print(f"RBAC roles and permissions are current; administrator {email} already exists")
+            return
 
         role = roles["Administrator"]
         user = User(

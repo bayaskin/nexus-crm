@@ -11,6 +11,7 @@ from app.core.database import get_db
 from app.core.security import decode_access_token, utcnow_naive
 from app.models.identity import Role, User
 from app.models.sessions import UserSession
+from app.services.permissions import has_permission
 
 bearer_scheme = HTTPBearer(auto_error=False)
 
@@ -52,7 +53,7 @@ def get_current_user(
         .where(User.id == user_id)
     )
 
-    if user is None or not user.is_active:
+    if user is None or not user.is_active or (user.password_expires_at is not None and user.password_expires_at <= utcnow_naive()):
         raise unauthorized
 
     return user
@@ -62,16 +63,9 @@ def require_permission(resource: str, action: str) -> Callable:
     required = f"{resource}:{action}"
 
     def dependency(user: User = Depends(get_current_user)) -> User:
-        if user.is_superuser:
-            return user
-
-        granted = {
-            f"{permission.resource}:{permission.action}"
-            for role in user.roles
-            for permission in role.permissions
-        }
-
-        if required not in granted:
+        if user.must_change_password:
+            raise HTTPException(status_code=403, detail="Password change required")
+        if not has_permission(user, required):
             raise HTTPException(
                 status_code=403,
                 detail="Insufficient permissions",

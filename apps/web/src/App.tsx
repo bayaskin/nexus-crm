@@ -18,6 +18,8 @@ import OrderDetailsPage from "./pages/OrderDetailsPage";
 import CustomersPage from "./pages/CustomersPage";
 import CustomerDetailsPage from "./pages/CustomerDetailsPage";
 import InventoryPage from "./pages/InventoryPage";
+import UsersPage from "./pages/UsersPage";
+import ChangePasswordPage from "./pages/ChangePasswordPage";
 
 function OverviewPage() {
   const { user, can } = useAuth();
@@ -76,6 +78,10 @@ function ProtectedRoutes() {
     return <div className="app-loading">Loading Nexus...</div>;
   }
 
+  if (user?.must_change_password) {
+    return <Routes><Route path="/change-password" element={<ChangePasswordPage />} /><Route path="*" element={<Navigate to="/change-password" replace />} /></Routes>;
+  }
+
   return (
     <Routes>
       <Route
@@ -87,6 +93,7 @@ function ProtectedRoutes() {
         element={user ? <AppLayout /> : <Navigate to="/login" replace />}
       >
         <Route path="/" element={<OverviewPage />} />
+        <Route path="/users" element={<PermissionRoute permission="users:read"><UsersPage /></PermissionRoute>} />
 
         <Route
           path="/orders"

@@ -40,6 +40,9 @@ def login(db: Session, request: Request, email: str, password: str) -> dict[str,
     user = db.scalar(select(User).where(User.email == email.lower()))
     if user is None or not user.is_active or not verify_password(password, user.password_hash):
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Incorrect email or password")
+    if user.password_expires_at and user.password_expires_at <= utcnow_naive():
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Temporary password expired")
+    user.last_login_at = utcnow_naive()
     result = _token_pair(user, db, request)
     db.commit()
     return result
@@ -74,6 +77,10 @@ def rotate_refresh_token(db: Session, request: Request, raw_token: str) -> dict[
         session.revoked_at = now
         db.commit()
         raise HTTPException(status_code=401, detail="User is inactive")
+    if user.password_expires_at is not None and user.password_expires_at <= now:
+        session.revoked_at = now
+        db.commit()
+        raise HTTPException(status_code=401, detail="Temporary password expired")
 
     replacement = _token_pair(user, db, request)
     session.revoked_at = now

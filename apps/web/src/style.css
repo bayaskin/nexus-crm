@@ -1099,6 +1099,33 @@ input {
   }
 }
 
+.user-management { margin-bottom: 20px; }
+.user-management .table-toolbar { flex-wrap: wrap; }
+.user-management .table-toolbar input { min-width: 210px; }
+.user-management table { width: 100%; border-collapse: collapse; font-size: 12px; }
+.user-management th, .user-management td { padding: 12px 14px; border-bottom: 1px solid var(--border); text-align: left; vertical-align: middle; }
+.user-management th { color: var(--muted); font-size: 10px; text-transform: uppercase; letter-spacing: .7px; }
+.user-actions { white-space: nowrap; }
+.user-actions button, .text-link { color: var(--blue); background: none; border: 0; margin-right: 8px; font-size: 11px; }
+.user-form, .user-detail { padding: 22px; margin: 20px 0; }
+.user-form form { display: grid; gap: 15px; }
+.user-form label { display: grid; gap: 6px; color: #59677b; font-size: 12px; }
+.user-form input, .user-form select, .user-management .table-toolbar input, .user-management .table-toolbar select { min-height: 39px; padding: 0 10px; border: 1px solid #dfe6ef; border-radius: 7px; background: white; }
+.user-form-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 13px; }
+.user-form fieldset { border: 1px solid var(--border); border-radius: 8px; padding: 13px; }
+.user-form legend { color: #59677b; font-size: 12px; padding: 0 6px; }
+.permission-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 9px; max-height: 260px; overflow: auto; }
+.permission-grid label { display: grid; grid-template-columns: minmax(0, 1fr) 160px; align-items: center; gap: 8px; font-size: 11px; }
+.user-form .user-check { display: flex; align-items: center; grid-template-columns: auto 1fr; }
+.user-form .user-check input { min-height: auto; }
+.form-error, .form-success { padding: 11px 13px; border-radius: 7px; margin-bottom: 14px; font-size: 12px; }
+.form-error { background: #fff0f0; color: #a8323f; }
+.form-success { background: #eaf8f1; color: #22734e; }
+.empty-state { padding: 28px; text-align: center; color: var(--muted); font-size: 13px; }
+.password-gate { min-height: 100vh; display: grid; place-items: center; padding: 20px; }
+.password-gate .panel { width: min(480px, 100%); }
+@media (max-width: 800px) { .user-form-grid, .permission-grid { grid-template-columns: 1fr; } .user-management .table-wrap { overflow-x: auto; } .user-management table { min-width: 850px; } }
+
 .stock-error-panel {
   background: #fff7f7;
   border: 1px solid #f2caca;

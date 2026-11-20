@@ -33,11 +33,11 @@ def create_access_token(user_id: UUID, session_id: UUID) -> str:
         "exp": now + timedelta(minutes=settings.access_token_minutes),
         "jti": secrets.token_urlsafe(16),
     }
-    return jwt.encode(payload, settings.jwt_secret_key, algorithm=ALGORITHM)
+    return jwt.encode(payload, settings.jwt_signing_key, algorithm=ALGORITHM)
 
 
 def decode_access_token(token: str) -> tuple[UUID, UUID]:
-    payload = jwt.decode(token, settings.jwt_secret_key, algorithms=[ALGORITHM])
+    payload = jwt.decode(token, settings.jwt_signing_key, algorithms=[ALGORITHM])
 
     if (
         payload.get("type") != "access"

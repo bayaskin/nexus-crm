@@ -14,6 +14,7 @@ export interface User {
   is_superuser: boolean;
   roles: string[];
   permissions: string[];
+  must_change_password?: boolean;
 }
 
 export interface Customer {

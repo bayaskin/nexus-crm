@@ -1,4 +1,7 @@
-from sqlalchemy import Boolean, Column, ForeignKey, String, Table, Uuid, UniqueConstraint
+from datetime import datetime
+from uuid import UUID
+
+from sqlalchemy import Boolean, Column, DateTime, ForeignKey, String, Table, Uuid, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.core.database import Base
@@ -19,11 +22,27 @@ role_permissions = Table(
 class User(UUIDPrimaryKey, TimestampMixin, Base):
     __tablename__ = "users"
     email: Mapped[str] = mapped_column(String(320), unique=True, index=True, nullable=False)
+    first_name: Mapped[str | None] = mapped_column(String(80))
+    last_name: Mapped[str | None] = mapped_column(String(80))
     full_name: Mapped[str] = mapped_column(String(160), nullable=False)
     password_hash: Mapped[str] = mapped_column(String(255), nullable=False)
     is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
     is_superuser: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    must_change_password: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    password_expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=False))
+    last_login_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=False))
     roles: Mapped[list["Role"]] = relationship(secondary=user_roles, back_populates="users", lazy="selectin")
+    permission_overrides: Mapped[list["UserPermissionOverride"]] = relationship(back_populates="user", cascade="all, delete-orphan", lazy="selectin")
+
+
+class UserPermissionOverride(UUIDPrimaryKey, TimestampMixin, Base):
+    __tablename__ = "user_permission_overrides"
+    __table_args__ = (UniqueConstraint("user_id", "permission_id", name="uq_user_permission_override"),)
+    user_id: Mapped[UUID] = mapped_column(Uuid(as_uuid=True, native_uuid=False), ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
+    permission_id: Mapped[UUID] = mapped_column(Uuid(as_uuid=True, native_uuid=False), ForeignKey("permissions.id", ondelete="CASCADE"), nullable=False)
+    effect: Mapped[str] = mapped_column(String(10), nullable=False)
+    user: Mapped[User] = relationship(back_populates="permission_overrides")
+    permission: Mapped["Permission"] = relationship(lazy="joined")
 
 
 class Role(UUIDPrimaryKey, TimestampMixin, Base):

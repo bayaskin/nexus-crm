@@ -61,6 +61,7 @@ export default function AppLayout() {
               Inventory
             </NavLink>
           )}
+          {can("users:read") && <NavLink to="/users"><Users size={18} />User management</NavLink>}
         </nav>
 
         <div className="sidebar-bottom">
