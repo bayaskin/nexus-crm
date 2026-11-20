@@ -88,9 +88,10 @@ function getErrorMessage(data: unknown): string {
 
 export async function apiRequest<T>(
   path: string,
-  options: RequestInit = {},
+  options: RequestInit & { onResponse?: (response: Response) => void } = {},
   retry = true,
 ): Promise<T> {
+  const { onResponse, ...requestOptions } = options;
   const headers = new Headers(options.headers);
   headers.set("Accept", "application/json");
 
@@ -108,7 +109,7 @@ export async function apiRequest<T>(
 
   try {
     response = await fetch(`${API_BASE}${path}`, {
-      ...options,
+      ...requestOptions,
       headers,
     });
   } catch {
@@ -126,6 +127,8 @@ export async function apiRequest<T>(
     window.dispatchEvent(new Event("nexus:unauthorized"));
     throw new ApiError("Your session has expired. Please sign in again.", 401);
   }
+
+  onResponse?.(response);
 
   if (!response.ok) {
     let data: unknown;
