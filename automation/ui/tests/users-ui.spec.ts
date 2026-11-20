@@ -6,6 +6,16 @@ const basePermissions = [
   "permissions:manage",
 ];
 
+const permissionKeys = [
+  "customers:read", "customers:create", "customers:update",
+  "products:read", "products:create", "products:update",
+  "inventory:read", "inventory:update", "inventory:adjust",
+  "orders:read", "orders:create", "orders:update", "orders:cancel",
+  "users:read", "users:create", "users:update", "users:deactivate", "users:reset_password",
+  "roles:read", "roles:assign", "permissions:read", "permissions:manage",
+  "qa:read", "qa:execute", "reports:read",
+];
+
 const seedUser = {
   id: "user-1",
   first_name: "Avery",
@@ -47,10 +57,10 @@ async function mockUsersPage(page: Page, permissions = basePermissions) {
   } }));
   await page.route("**/api/v1/users/metadata", route => route.fulfill({ json: {
     roles: [
-      { name: "Admin", permissions: ["users:read", "users:update", "customers:read", "orders:cancel"] },
-      { name: "User", permissions: ["customers:read"] },
+      { name: "Admin", permissions: permissionKeys },
+      { name: "User", permissions: ["customers:read", "orders:read", "products:read"] },
     ],
-    permissions: ["users:read", "users:update", "customers:read", "orders:cancel"],
+    permissions: permissionKeys,
   } }));
   await page.route("**/api/v1/users?**", route => {
     const url = new URL(route.request().url());
@@ -72,8 +82,16 @@ async function mockUsersPage(page: Page, permissions = basePermissions) {
   });
   await page.route("**/api/v1/users/user-1", async route => {
     if (route.request().method() === "PATCH") {
-      const body = route.request().postDataJSON() as { first_name?: string; last_name?: string; email?: string };
+      const body = route.request().postDataJSON() as { first_name?: string; last_name?: string; email?: string; permission_overrides?: Record<string, string> };
       currentUser = { ...currentUser, ...body, full_name: `${body.first_name || currentUser.first_name} ${body.last_name || currentUser.last_name}` };
+      if (body.permission_overrides) {
+        const effective = new Set(currentUser.effective_permissions);
+        for (const [key, effect] of Object.entries(body.permission_overrides)) {
+          if (effect === "allow") effective.add(key);
+          else if (effect === "deny") effective.delete(key);
+        }
+        currentUser.effective_permissions = [...effective];
+      }
       await route.fulfill({ json: currentUser });
       return;
     }
@@ -123,9 +141,12 @@ test("user details dialog closes, displays permission groups, and returns to the
   await expect(dialog).toBeVisible();
   await expect(dialog).toContainText("avery@example.com");
   await expect(dialog).toContainText("Temporary password expires");
-  await expect(dialog.getByRole("heading", { name: "Inherited role permissions" })).toBeVisible();
-  await expect(dialog.getByText("orders:cancel", { exact: true })).toBeVisible();
-  await expect(dialog.getByText("Denied", { exact: true })).toBeVisible();
+  await expect(dialog.getByRole("heading", { name: "Permissions from assigned roles" })).toBeVisible();
+  await expect(dialog.getByText("Cancel orders", { exact: true })).toBeVisible();
+  await expect(dialog.getByText("Blocked", { exact: true })).toBeVisible();
+  await expect(dialog.getByText("Allowed", { exact: true })).toBeVisible();
+  const detailsText = await dialog.innerText();
+  for (const key of permissionKeys) expect(detailsText).not.toContain(key);
   await expect(page.locator("body")).toHaveCSS("overflow", "hidden");
   await page.keyboard.press("Escape");
   await expect(dialog).toBeHidden();
@@ -134,10 +155,44 @@ test("user details dialog closes, displays permission groups, and returns to the
   const reopened = page.getByRole("dialog", { name: "Avery Admin" });
   await reopened.getByRole("button", { name: "Edit user" }).click();
   await expect(reopened.getByRole("heading", { name: "Edit Avery Admin" })).toBeVisible();
+  const customersRead = reopened.getByLabel("View customers setting");
+  await expect(customersRead).toHaveValue("allow");
+  await expect(customersRead.locator("option")).toHaveText(["Default", "Allowed", "Blocked"]);
+  await expect(reopened.getByLabel("Cancel orders setting")).toHaveValue("deny");
+  await expect(reopened.getByLabel("Create users setting")).toHaveValue("inherit");
+  await expect(reopened.getByText("Access customer records and details.")).toBeVisible();
+  await expect(reopened.getByText("Order cancellation currently follows the Edit orders access setting.")).toBeVisible();
+  await expect(reopened.getByText("This access setting is registered, but no current API action checks it.")).toBeVisible();
+  await expect(reopened.getByRole("heading", { name: "Customers" })).toBeVisible();
+  await expect(reopened.getByRole("heading", { name: "Quality assurance" })).toBeVisible();
+  await expect(reopened.locator(".permission-setting")).toHaveCount(permissionKeys.length);
+  await expect(reopened.locator(".permission-copy p")).toHaveCount(permissionKeys.length);
+  for (const selector of await reopened.locator(".permission-setting select").all()) {
+    await expect(selector.locator("option")).toHaveText(["Default", "Allowed", "Blocked"]);
+  }
+  const visibleEditorText = await reopened.innerText();
+  for (const key of permissionKeys) expect(visibleEditorText).not.toContain(key);
+  await expect(reopened.getByLabel("Reset user passwords setting")).toHaveCount(1);
+  await expect(reopened.getByLabel("Run quality checks setting")).toHaveCount(1);
+  await page.setViewportSize({ width: 390, height: 844 });
+  const setting = reopened.locator(".permission-setting").first();
+  const copyBox = await setting.locator(".permission-copy").boundingBox();
+  const selectorBox = await setting.locator("select").boundingBox();
+  expect(copyBox).not.toBeNull();
+  expect(selectorBox).not.toBeNull();
+  expect(selectorBox!.x + selectorBox!.width).toBeLessThanOrEqual(390);
+  expect(selectorBox!.y).toBeGreaterThanOrEqual(copyBox!.y + copyBox!.height);
+  await customersRead.selectOption("deny");
   await reopened.getByLabel("First name").fill("Avery Updated");
   await reopened.getByRole("button", { name: "Save changes" }).click();
   await expect(page.getByRole("dialog", { name: "Avery Updated Admin" })).toBeVisible();
   await expect(page.getByRole("status")).toContainText("User updated.");
+  const updatedDialog = page.getByRole("dialog", { name: "Avery Updated Admin" });
+  await expect(updatedDialog.getByText("View customers", { exact: true })).toBeVisible();
+  await expect(updatedDialog.getByText("Blocked", { exact: true })).toHaveCount(2);
+  await updatedDialog.getByRole("button", { name: "Edit user" }).click();
+  await expect(page.getByRole("dialog").getByLabel("View customers setting")).toHaveValue("deny");
+  await page.getByRole("dialog").getByRole("button", { name: "Close edit form" }).click();
   await page.getByRole("dialog").getByRole("button", { name: "Close", exact: true }).click();
   await expect(page.getByRole("dialog")).toBeHidden();
 });

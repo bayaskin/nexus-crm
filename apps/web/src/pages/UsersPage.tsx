@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { apiRequest } from "../api/client";
 import { useAuth } from "../auth/AuthContext";
+import { describePermission, groupPermissions } from "../permissions/metadata";
 
 type Person = { id: string; first_name: string; last_name: string; full_name: string; email: string; roles: string[]; is_active: boolean; last_login_at: string | null; created_at: string; updated_at: string; password_expires_at: string | null; permission_overrides: Record<string, string>; effective_permissions: string[]; must_change_password: boolean };
 type Metadata = { roles: { name: string; permissions: string[] }[]; permissions: string[] };
@@ -30,7 +31,8 @@ export default function UsersPage() {
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
-  const inheritedPermissions = uniqueSorted(metadata.roles.filter(item => form.role_names.includes(item.name)).flatMap(item => item.permissions));
+  const permissionsByGroup = groupPermissions(metadata.permissions);
+  const rolePermissions = uniqueSorted(metadata.roles.filter(item => form.role_names.includes(item.name)).flatMap(item => item.permissions));
   const totalPages = Math.max(1, Math.ceil(totalUsers / PAGE_SIZE));
   const rangeStart = totalUsers === 0 ? 0 : (page - 1) * PAGE_SIZE + 1;
   const rangeEnd = Math.min(page * PAGE_SIZE, totalUsers);
@@ -149,16 +151,26 @@ export default function UsersPage() {
         {can("roles:assign") ? <label>Roles<select multiple value={form.role_names} onChange={e => setForm({ ...form, role_names: Array.from(e.target.selectedOptions, option => option.value) })}>{metadata.roles.map(r => <option key={r.name} value={r.name}>{r.name}</option>)}</select></label> : selected && <div className="muted">Roles: {selected.roles.join(", ") || "None"}</div>}
       </div>
       <fieldset>
-        <legend>Permission overrides</legend>
-        <p className="muted">Inherited from selected roles: {inheritedPermissions.join(", ") || "None"}</p>
-        {can("permissions:manage") ? <div className="permission-grid">{metadata.permissions.map(permission => <label key={permission}>{permission}<select aria-label={`${permission} override`} value={form.permission_overrides[permission] || "inherit"} onChange={e => { const next = { ...form.permission_overrides }; if (e.target.value === "inherit") delete next[permission]; else next[permission] = e.target.value; setForm({ ...form, permission_overrides: next }); }}><option value="inherit">Inherited</option><option value="allow">Explicit allow</option><option value="deny">Explicit deny</option></select></label>)}</div> : <p className="muted">You do not have permission to edit individual overrides.</p>}
+        <legend>Customize individual permissions</legend>
+        <p className="permission-intro">Permissions follow the user's assigned role by default. You can customize individual permissions below to allow or block specific actions for this user.</p>
+        <p className="permission-choice-note"><strong>Default</strong> follows assigned roles. <strong>Allowed</strong> grants the action to this user. <strong>Blocked</strong> prevents it, even when an assigned role allows it.</p>
+        <div className="role-permission-summary"><strong>Permissions from selected roles</strong><PermissionChips values={rolePermissions} empty="No role permissions" /></div>
+        {can("permissions:manage") ? <div className="permission-groups">{permissionsByGroup.map(group => <section className="permission-group" key={group.key} aria-labelledby={`permission-group-${group.key}`}>
+          <h3 id={`permission-group-${group.key}`}>{group.label}</h3>
+          {group.permissions.map(permission => <div className="permission-setting" key={permission.key}>
+            <div className="permission-copy"><label htmlFor={`permission-setting-${permission.key}`}>{permission.label}</label><p>{permission.description}</p></div>
+            <select id={`permission-setting-${permission.key}`} aria-label={`${permission.label} setting`} value={form.permission_overrides[permission.key] || "inherit"} onChange={e => { const next = { ...form.permission_overrides }; if (e.target.value === "inherit") delete next[permission.key]; else next[permission.key] = e.target.value; setForm({ ...form, permission_overrides: next }); }}>
+              <option value="inherit">Default</option><option value="allow">Allowed</option><option value="deny">Blocked</option>
+            </select>
+          </div>)}
+        </section>)}</div> : <p className="muted">You do not have permission to customize individual access settings.</p>}
       </fieldset>
       {!selected && <label className="user-check"><input type="checkbox" checked={form.send_credentials} onChange={e => setForm({ ...form, send_credentials: e.target.checked })} /> Email temporary credentials (required password change)</label>}
       <div className="form-actions"><button className="primary-button" disabled={saving}>{saving ? "Saving…" : selected ? "Save changes" : "Create user"}</button><button type="button" className="secondary-button" onClick={() => { if (selected) setEditing(false); else { setEditing(false); setSelected(null); } }}>Cancel</button></div>
     </form>;
   }
 
-  const selectedInheritedPermissions = selected ? uniqueSorted(metadata.roles.filter(item => selected.roles.includes(item.name)).flatMap(item => item.permissions)) : [];
+  const selectedRolePermissions = selected ? uniqueSorted(metadata.roles.filter(item => selected.roles.includes(item.name)).flatMap(item => item.permissions)) : [];
 
   return <div>
     <div className="page-heading"><div><div className="eyebrow">SYSTEM / ACCESS CONTROL</div><h1>User management</h1><p className="muted">Create accounts, assign roles, and control individual permissions.</p></div></div>
@@ -193,9 +205,9 @@ export default function UsersPage() {
             <div><span>Created</span><strong>{formatDate(selected.created_at)}</strong></div>
             <div><span>Updated</span><strong>{formatDate(selected.updated_at)}</strong></div>
           </div>
-          <section className="user-permission-section"><h3>Inherited role permissions</h3><PermissionChips values={selectedInheritedPermissions} empty="No inherited permissions" /></section>
-          <section className="user-permission-section"><h3>Effective permissions</h3><PermissionChips values={selected.effective_permissions} empty="No effective permissions" /></section>
-          <section className="user-permission-section"><h3>Explicit overrides</h3>{Object.keys(selected.permission_overrides).length ? <div className="permission-chips">{Object.entries(selected.permission_overrides).sort(([a], [b]) => a.localeCompare(b)).map(([permission, effect]) => <span className={`permission-chip override-${effect}`} key={permission}><strong>{effect === "deny" ? "Denied" : "Allowed"}</strong>{permission}</span>)}</div> : <p className="muted">No explicit overrides</p>}</section>
+          <section className="user-permission-section"><h3>Permissions from assigned roles</h3><PermissionChips values={selectedRolePermissions} empty="No role permissions" /></section>
+          <section className="user-permission-section"><h3>Current access</h3><PermissionChips values={selected.effective_permissions} empty="No permissions available" /></section>
+          <section className="user-permission-section"><h3>Individual access settings</h3>{Object.keys(selected.permission_overrides).length ? <><div className="permission-chips">{Object.entries(selected.permission_overrides).sort(([a], [b]) => a.localeCompare(b)).map(([key, effect]) => <span className={`permission-chip override-${effect}`} key={key}><strong>{effect === "deny" ? "Blocked" : "Allowed"}</strong>{describePermission(key).label}</span>)}</div><p className="permission-default-note">All other permissions follow the selected roles by default.</p></> : <p className="muted">All permissions follow the selected roles by default.</p>}</section>
           <div className="customer-modal-actions user-dialog-actions"><button className="secondary-button" onClick={closeDetails}>Close</button>{can("users:update") && <button className="primary-button" onClick={() => startEdit(selected)}>Edit user</button>}</div>
         </>}
       </section>
@@ -204,5 +216,5 @@ export default function UsersPage() {
 }
 
 function PermissionChips({ values, empty }: { values: string[]; empty: string }) {
-  return values.length ? <div className="permission-chips">{values.map(permission => <span className="permission-chip" key={permission}>{permission}</span>)}</div> : <p className="muted">{empty}</p>;
+  return values.length ? <div className="permission-chips">{values.map(permission => <span className="permission-chip" key={permission}>{describePermission(permission).label}</span>)}</div> : <p className="muted">{empty}</p>;
 }
