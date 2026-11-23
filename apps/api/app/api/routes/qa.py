@@ -8,6 +8,7 @@ from app.core.database import SessionLocal, get_db
 from app.models.identity import User
 from app.models.qa import QARun
 from app.schemas.qa import CreateQARunRequest, QARunError, QARunListResponse, QARunResponse, QARunResult, QARunState, QARunStatus, QARunConfig, QATriggerType
+from app.schemas.github import GitHubPRContext
 from app.services.qa_orchestrator import (
     InvalidQARunTransition,
     QARunCannotBeCancelled,
@@ -34,6 +35,7 @@ def serialize_run(run: QARun) -> QARunResponse:
         result=QARunResult.model_validate(run.result) if run.result else None,
         error=QARunError.model_validate(run.error) if run.error else None,
         cancel_requested=run.cancel_requested,
+        github_context=GitHubPRContext.model_validate(run.github_context) if run.github_context else None,
         created_at=run.created_at,
         updated_at=run.updated_at,
         started_at=run.started_at,

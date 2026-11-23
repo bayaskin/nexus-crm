@@ -1,7 +1,7 @@
 from datetime import datetime
 from uuid import UUID
 
-from sqlalchemy import Boolean, CheckConstraint, DateTime, ForeignKey, Index, Integer, JSON, String, Uuid, func
+from sqlalchemy import BigInteger, Boolean, CheckConstraint, DateTime, ForeignKey, Index, Integer, JSON, String, UniqueConstraint, Uuid, func
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.core.database import Base
@@ -13,11 +13,13 @@ class QARun(UUIDPrimaryKey, Base):
     __table_args__ = (
         CheckConstraint(
             "status in ('pending', 'initializing', 'analyzing', 'planning', 'running_checks', "
-            "'generating_report', 'completed', 'failed', 'cancelled', 'timed_out')",
+            "'generating_report', 'completed', 'failed', 'cancelled', 'timed_out', 'superseded')",
             name="ck_qa_runs_status",
         ),
         CheckConstraint("progress >= 0 and progress <= 100", name="ck_qa_runs_progress"),
         Index("ix_qa_runs_status_created_at", "status", "created_at"),
+        UniqueConstraint("github_revision_id", name="uq_qa_runs_github_revision_occurrence"),
+        UniqueConstraint("github_delivery_id", name="uq_qa_runs_github_delivery"),
     )
 
     requested_by_user_id: Mapped[UUID | None] = mapped_column(
@@ -32,6 +34,14 @@ class QARun(UUIDPrimaryKey, Base):
     result: Mapped[dict | None] = mapped_column(JSON)
     error: Mapped[dict | None] = mapped_column(JSON)
     cancel_requested: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    github_repository_id: Mapped[int | None] = mapped_column(BigInteger)
+    github_pr_number: Mapped[int | None] = mapped_column(Integer)
+    github_head_sha: Mapped[str | None] = mapped_column(String(40))
+    github_delivery_id: Mapped[str | None] = mapped_column(String(128))
+    github_context: Mapped[dict | None] = mapped_column(JSON)
+    github_revision_id: Mapped[str | None] = mapped_column(
+        String(36), ForeignKey("github_pr_revisions.id", ondelete="RESTRICT")
+    )
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=False), nullable=False, server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=False), nullable=False, server_default=func.now(), onupdate=func.now())
     started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=False))

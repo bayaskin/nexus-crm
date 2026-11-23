@@ -25,6 +25,12 @@ class ContextStage:
     progress = 25
 
     async def execute(self, state: QARunState, _provider: AIProvider) -> QARunStage:
+        if state.github_context:
+            state.context = FoundationContext(
+                note="Captured immutable GitHub pull request metadata; no repository analysis was performed.",
+                github_pull_request=state.github_context,
+            )
+            return QARunStage(name=self.name, summary="Captured the immutable pull request revision and changed-file snapshot.")
         state.context = FoundationContext()
         return QARunStage(name=self.name, summary="Confirmed this run has no repository or pull request input.")
 

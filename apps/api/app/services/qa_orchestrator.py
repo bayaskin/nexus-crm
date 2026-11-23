@@ -18,6 +18,7 @@ from app.schemas.qa import (
     QARunStatus,
     QATriggerType,
 )
+from app.schemas.github import GitHubPRContext
 from app.services.qa_providers import AIProvider, MockAIProvider
 from app.services.qa_workflow import FoundationWorkflow, QAWorkflow
 
@@ -43,6 +44,7 @@ TERMINAL_STATUSES = {
     QARunStatus.FAILED,
     QARunStatus.CANCELLED,
     QARunStatus.TIMED_OUT,
+    QARunStatus.SUPERSEDED,
 }
 ACTIVE_STATUSES = {
     QARunStatus.PENDING,
@@ -84,28 +86,46 @@ class QARunOrchestrator:
         self.clock = clock or utcnow_naive
         self.monotonic_clock = monotonic_clock
 
-    def create(self, db: Session, request: CreateQARunRequest, actor: User) -> QARun:
+    def create(
+        self,
+        db: Session,
+        request: CreateQARunRequest,
+        actor: User | None,
+        *,
+        github_context: GitHubPRContext | None = None,
+        trigger_type: QATriggerType | None = None,
+        commit: bool = True,
+    ) -> QARun:
+        selected_trigger = trigger_type or request.trigger_type
         run = QARun(
-            requested_by_user_id=actor.id,
-            trigger_type=request.trigger_type.value,
+            requested_by_user_id=actor.id if actor else None,
+            trigger_type=selected_trigger.value,
             status=QARunStatus.PENDING.value,
             progress=0,
             timeout_seconds=request.config.timeout_seconds,
             input_config=request.config.model_dump(mode="json"),
             state_data=None,
+            github_repository_id=github_context.repository_id if github_context else None,
+            github_pr_number=github_context.pull_request_number if github_context else None,
+            github_head_sha=github_context.head_sha if github_context else None,
+            github_delivery_id=github_context.delivery_id if github_context else None,
+            github_context=github_context.model_dump(mode="json") if github_context else None,
+            github_revision_id=getattr(github_context, "revision_id", None),
         )
         db.add(run)
         db.flush()
         initial_state = QARunState(
             run_id=run.id,
-            trigger_type=request.trigger_type,
+            trigger_type=selected_trigger,
             status=QARunStatus.PENDING,
             progress=0,
             config=request.config,
+            github_context=github_context,
         )
         run.state_data = initial_state.model_dump(mode="json")
-        db.commit()
-        db.refresh(run)
+        if commit:
+            db.commit()
+            db.refresh(run)
         return run
 
     def list(self, db: Session, *, skip: int, limit: int, status: QARunStatus | None = None) -> tuple[list[QARun], int]:
@@ -247,7 +267,7 @@ class QARunOrchestrator:
                 persisted = progress_db.get(QARun, run_id)
                 if persisted is None:
                     raise QARunNotFound
-                if persisted.cancel_requested or QARunStatus(persisted.status) == QARunStatus.CANCELLED:
+                if persisted.cancel_requested or QARunStatus(persisted.status) in {QARunStatus.CANCELLED, QARunStatus.SUPERSEDED}:
                     raise QARunCancelled
                 if self.monotonic_clock() >= deadline:
                     raise TimeoutError

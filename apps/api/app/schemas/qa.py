@@ -5,6 +5,8 @@ from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from app.schemas.github import GitHubPRContext
+
 
 class QARunStatus(StrEnum):
     PENDING = "pending"
@@ -17,10 +19,12 @@ class QARunStatus(StrEnum):
     FAILED = "failed"
     CANCELLED = "cancelled"
     TIMED_OUT = "timed_out"
+    SUPERSEDED = "superseded"
 
 
 class QATriggerType(StrEnum):
     MANUAL = "manual"
+    GITHUB_PULL_REQUEST = "github_pull_request"
 
 
 class QARunConfig(BaseModel):
@@ -54,7 +58,7 @@ class TestExecutionResult(BaseModel):
 class CreateQARunRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    trigger_type: QATriggerType = QATriggerType.MANUAL
+    trigger_type: Literal[QATriggerType.MANUAL] = QATriggerType.MANUAL
     config: QARunConfig = Field(default_factory=QARunConfig)
 
 
@@ -62,6 +66,7 @@ class FoundationContext(BaseModel):
     kind: Literal["foundation_context"] = "foundation_context"
     note: str = "No repository or pull request was provided for this foundation run."
     repository_analysis_performed: bool = False
+    github_pull_request: GitHubPRContext | None = None
 
 
 class FoundationPlan(BaseModel):
@@ -87,6 +92,7 @@ class QARunState(BaseModel):
     plan: FoundationPlan | None = None
     stages: list[QARunStage] = Field(default_factory=list)
     cancellation_requested: bool = False
+    github_context: GitHubPRContext | None = None
 
 
 class QARunResult(BaseModel):
@@ -100,7 +106,7 @@ class QARunResult(BaseModel):
 
 
 class QARunError(BaseModel):
-    code: Literal["workflow_failed", "cancelled", "timed_out"]
+    code: Literal["workflow_failed", "cancelled", "timed_out", "superseded"]
     message: str
 
 
@@ -115,6 +121,7 @@ class QARunResponse(BaseModel):
     result: QARunResult | None = None
     error: QARunError | None = None
     cancel_requested: bool
+    github_context: GitHubPRContext | None = None
     created_at: datetime
     updated_at: datetime
     started_at: datetime | None

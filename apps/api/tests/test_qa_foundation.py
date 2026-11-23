@@ -22,6 +22,8 @@ def test_run_config_validates_timeout_and_rejects_unrecognized_fields():
         CreateQARunRequest(config={"timeout_seconds": 0})
     with pytest.raises(ValidationError):
         CreateQARunRequest(extra_input="not supported")
+    with pytest.raises(ValidationError):
+        CreateQARunRequest(trigger_type="github_pull_request")
 
 
 def test_status_values_and_state_serialization_round_trip():
@@ -36,6 +38,7 @@ def test_status_values_and_state_serialization_round_trip():
     assert {status.value for status in QARunStatus} == {
         "pending", "initializing", "analyzing", "planning", "running_checks",
         "generating_report", "completed", "failed", "cancelled", "timed_out",
+        "superseded",
     }
 
 

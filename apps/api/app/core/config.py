@@ -15,6 +15,13 @@ class Settings(BaseSettings):
     smtp_port: int = 1025
     smtp_from: str = "nexus@localhost"
     app_login_url: str = "http://localhost:8080/login"
+    github_token: SecretStr | None = None
+    github_webhook_secret: SecretStr | None = None
+    github_allowed_repositories: str = ""
+    github_ingestion_timeout_seconds: int = 60
+    github_api_request_timeout_seconds: int = 8
+    github_api_max_retries: int = 2
+    github_api_max_response_bytes: int = 2_000_000
 
     model_config = SettingsConfigDict(case_sensitive=False)
 
@@ -36,6 +43,10 @@ class Settings(BaseSettings):
             raise ValueError("JWT_SECRET_KEY must contain at least 32 characters")
         if self.access_token_minutes < 1 or self.refresh_token_days < 1 or self.temporary_password_hours < 1:
             raise ValueError("Token and temporary password lifetimes must be positive")
+        if not 1 <= self.github_ingestion_timeout_seconds <= 300 or not 1 <= self.github_api_request_timeout_seconds <= 30:
+            raise ValueError("GitHub API deadlines are outside the permitted range")
+        if not 0 <= self.github_api_max_retries <= 5 or not 1024 <= self.github_api_max_response_bytes <= 10_000_000:
+            raise ValueError("GitHub API response limits are outside the permitted range")
         return self
 
     @property
@@ -45,6 +56,14 @@ class Settings(BaseSettings):
     @property
     def allowed_origins(self) -> list[str]:
         return [origin.strip() for origin in self.cors_origins.split(",") if origin.strip()]
+
+    @property
+    def allowed_github_repositories(self) -> set[str]:
+        return {
+            repository.strip().casefold()
+            for repository in self.github_allowed_repositories.split(",")
+            if repository.strip()
+        }
 
 
 settings = Settings()

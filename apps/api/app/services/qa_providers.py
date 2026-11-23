@@ -14,8 +14,12 @@ class MockAIProvider:
     """Deterministic provider that works offline and makes no external calls."""
 
     async def create_foundation_plan(self, context: FoundationContext) -> FoundationPlan:
-        del context
+        if context.github_pull_request is not None:
+            return FoundationPlan(
+                summary="Pull request metadata was captured; no code assessment was performed.",
+                next_step="Code assessment and test execution are outside this milestone.",
+            )
         return FoundationPlan(
             summary="Mock provider is ready; no repository or pull request was analyzed.",
-            next_step="Add a controlled pull request context collection stage in a later milestone.",
+            next_step="Add controlled pull request context collection in a later milestone.",
         )
