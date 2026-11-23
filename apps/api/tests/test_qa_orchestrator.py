@@ -15,9 +15,10 @@ os.environ.setdefault("JWT_SECRET_KEY", "qa-foundation-test-signing-key-2026-abc
 
 from app.models.qa import QARun  # noqa: E402
 from app.models.identity import User  # noqa: E402
-from app.schemas.qa import CreateQARunRequest, FoundationContext, FoundationPlan, QARunError, QARunState, QARunStatus  # noqa: E402
+from app.schemas.github import GitHubChangedFile, GitHubPRContext  # noqa: E402
+from app.schemas.qa import CreateQARunRequest, FoundationContext, FoundationPlan, QARunError, QARunState, QARunStatus, QATriggerType  # noqa: E402
 from app.services.qa_orchestrator import QARunCannotBeCancelled, QARunOrchestrator  # noqa: E402
-from app.services.qa_workflow import ContextStage, FoundationWorkflow  # noqa: E402
+from app.services.qa_workflow import ChangeImpactAnalysisStage, ContextStage, FoundationWorkflow, PlanningStage, ReportStage  # noqa: E402
 
 
 @pytest.fixture
@@ -70,7 +71,100 @@ def test_successful_run_persists_progress_state_result_and_duration(qa_store):
     assert persisted.result["test_execution"]["status"] == "not_run"
     assert persisted.result["assessment"] == "not_assessed"
     assert len(persisted.result["stages"]) == 3
+    assert persisted.state_data["change_impact_analysis"] is None
+    assert persisted.result["change_impact_analysis"] is None
     assert QARunStatus(persisted.state_data["status"]) == QARunStatus.COMPLETED
+
+
+def github_context() -> GitHubPRContext:
+    return GitHubPRContext(
+        repository_id=123456789,
+        repository_full_name="acme/widget",
+        repository_owner="acme",
+        repository_name="widget",
+        pull_request_number=7,
+        title="Update QA workflow",
+        url="https://github.com/acme/widget/pull/7",
+        author="tester",
+        state="open",
+        draft=False,
+        source_branch="feature/update-qa-workflow",
+        target_branch="main",
+        base_sha="a" * 40,
+        head_sha="b" * 40,
+        changed_files=[GitHubChangedFile(
+            path="apps/api/app/services/qa_workflow.py",
+            status="modified",
+            additions=4,
+            deletions=1,
+            changes=5,
+        )],
+        reported_changed_files=1,
+        event_type="synchronize",
+        delivery_id="orchestrator-impact-test",
+        event_updated_at=datetime.now(timezone.utc).replace(tzinfo=None),
+    )
+
+
+def test_github_run_persists_change_impact_analysis_in_state_and_result(qa_store):
+    orchestrator = QARunOrchestrator(qa_store)
+    db = qa_store()
+    try:
+        run = orchestrator.create(
+            db,
+            CreateQARunRequest(),
+            None,
+            github_context=github_context(),
+            trigger_type=QATriggerType.GITHUB_PULL_REQUEST,
+        )
+    finally:
+        db.close()
+
+    orchestrator.execute(run.id)
+    persisted = load_run(qa_store, run.id)
+    analysis = persisted.state_data["change_impact_analysis"]
+    assert persisted.status == QARunStatus.COMPLETED.value
+    assert analysis["head_sha"] == "b" * 40
+    assert analysis["impacted_components"]
+    assert "agentic_qa" in [item["component_id"] for item in analysis["impacted_components"]]
+    assert "apps/api/tests/test_qa_orchestrator.py" in {
+        suite["suite_id"] for suite in analysis["candidate_test_suites"]
+    }
+    assert persisted.result["change_impact_analysis"] == analysis
+    assert persisted.result["test_execution"]["status"] == "not_run"
+
+
+class FailingImpactAnalyzer:
+    def analyze(self, _context):
+        raise RuntimeError("private analyzer details")
+
+
+def test_github_impact_analysis_failure_marks_run_failed_without_details(qa_store):
+    workflow = FoundationWorkflow(stages=(
+        ContextStage(),
+        ChangeImpactAnalysisStage(FailingImpactAnalyzer()),
+        PlanningStage(),
+        ReportStage(),
+    ))
+    orchestrator = QARunOrchestrator(qa_store, workflow=workflow)
+    db = qa_store()
+    try:
+        run = orchestrator.create(
+            db,
+            CreateQARunRequest(),
+            None,
+            github_context=github_context(),
+            trigger_type=QATriggerType.GITHUB_PULL_REQUEST,
+        )
+    finally:
+        db.close()
+
+    orchestrator.execute(run.id)
+    persisted = load_run(qa_store, run.id)
+    assert persisted.status == QARunStatus.FAILED.value
+    assert persisted.result is None
+    assert persisted.error["code"] == "workflow_failed"
+    assert "private analyzer details" not in str(persisted.error)
 
 
 def test_multiple_runs_are_isolated_and_terminal_run_cannot_be_cancelled(qa_store):

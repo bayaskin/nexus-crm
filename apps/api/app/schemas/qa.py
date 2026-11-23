@@ -5,6 +5,7 @@ from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from app.schemas.change_impact import ChangeImpactAnalysis
 from app.schemas.github import GitHubPRContext
 
 
@@ -93,6 +94,7 @@ class QARunState(BaseModel):
     stages: list[QARunStage] = Field(default_factory=list)
     cancellation_requested: bool = False
     github_context: GitHubPRContext | None = None
+    change_impact_analysis: ChangeImpactAnalysis | None = None
 
 
 class QARunResult(BaseModel):
@@ -102,6 +104,7 @@ class QARunResult(BaseModel):
     context: FoundationContext
     plan: FoundationPlan
     stages: list[QARunStage]
+    change_impact_analysis: ChangeImpactAnalysis | None = None
     test_execution: TestExecutionResult = Field(default_factory=TestExecutionResult)
 
 

@@ -164,6 +164,23 @@ def test_supported_pull_request_actions_capture_typed_immutable_context(runtime,
         assert persisted.github_context["delivery_id"] == "delivery-1"
 
 
+def test_ingested_github_run_executes_change_impact_analysis(runtime):
+    factory, orchestrator, make_service = runtime
+    accepted = ingest(make_service(), event_payload(), delivery="impact-ingestion")
+    orchestrator.execute(accepted.run.id)
+
+    with factory() as db:
+        persisted = db.get(QARun, accepted.run.id)
+        analysis = persisted.state_data["change_impact_analysis"]
+        assert persisted.status == QARunStatus.COMPLETED.value
+        assert analysis["repository_id"] == REPOSITORY_ID
+        assert analysis["base_sha"] == BASE_SHA
+        assert analysis["head_sha"] == "b" * 40
+        assert analysis["changed_files"][0]["path"] == "src/app.py"
+        assert persisted.result["change_impact_analysis"] == analysis
+        assert persisted.result["test_execution"]["status"] == "not_run"
+
+
 def test_duplicate_delivery_and_duplicate_revision_are_idempotent(runtime):
     factory, _, make_service = runtime
     body = event_payload()
