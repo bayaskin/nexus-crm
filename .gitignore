@@ -16,3 +16,4 @@ allure-report/
 .idea/
 .vscode/
 .DS_Store
+.venv/
