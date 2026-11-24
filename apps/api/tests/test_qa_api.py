@@ -1,4 +1,5 @@
 import os
+from datetime import datetime
 from pathlib import Path
 from uuid import uuid4
 
@@ -17,7 +18,8 @@ from app.core.database import get_db  # noqa: E402
 from app.main import app  # noqa: E402
 from app.models.identity import Permission, Role, User  # noqa: E402
 from app.models.qa import QARun  # noqa: E402
-from app.schemas.qa import CreateQARunRequest  # noqa: E402
+from app.schemas.github import GitHubChangedFile as GitHubFile, GitHubPRContext as PRContext  # noqa: E402
+from app.schemas.qa import CreateQARunRequest, QATriggerType  # noqa: E402
 from app.services.qa_orchestrator import QARunOrchestrator  # noqa: E402
 
 
@@ -108,6 +110,61 @@ def test_qa_api_create_get_list_filter_and_validate_input_and_id(client):
     assert test_client.get(f"/v1/qa/runs/{uuid4()}").status_code == 404
     assert test_client.post("/v1/qa/runs", json={"config": {"timeout_seconds": 0}}).status_code == 422
     assert test_client.post("/v1/qa/runs", json={"source_repository": "not-implemented"}).status_code == 422
+
+
+def test_qa_api_serializes_bound_test_plan_for_github_run(client):
+    test_client, factory = client
+    set_permissions(test_client, "qa:read")
+    context = PRContext(
+        repository_id=123456,
+        repository_full_name="example/project",
+        repository_owner="example",
+        repository_name="project",
+        pull_request_number=18,
+        title="Secure authentication changes",
+        url="https://github.com/example/project/pull/18",
+        author="contributor",
+        state="open",
+        draft=False,
+        source_branch="feature/authentication",
+        target_branch="main",
+        base_sha="a" * 40,
+        head_sha="b" * 40,
+        changed_files=[GitHubFile(
+            path="apps/api/app/api/routes/auth.py",
+            status="modified",
+            additions=3,
+            deletions=1,
+            changes=4,
+        )],
+        reported_changed_files=1,
+        revision_id="77777777-7777-4777-8777-777777777777",
+        event_type="synchronize",
+        delivery_id="qa-api-test-plan",
+        event_updated_at=datetime(2026, 2, 12),
+    )
+    orchestrator = QARunOrchestrator(factory)
+    db = factory()
+    try:
+        run = orchestrator.create(
+            db,
+            CreateQARunRequest(),
+            None,
+            github_context=context,
+            trigger_type=QATriggerType.GITHUB_PULL_REQUEST,
+        )
+    finally:
+        db.close()
+    orchestrator.execute(run.id)
+
+    response = test_client.get(f"/v1/qa/runs/{run.id}")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["state"]["test_plan"]["approval_status"] == "suggested"
+    assert payload["state"]["test_plan"]["revision"]["revision_id"] == context.revision_id
+    assert payload["result"]["test_plan"] == payload["state"]["test_plan"]
+    assert payload["result"]["test_plan"]["omitted_suite_count"] == 0
 
 
 def test_qa_api_cancellation_requires_execute_and_returns_conflict_for_terminal_runs(client):

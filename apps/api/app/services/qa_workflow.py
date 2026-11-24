@@ -1,9 +1,17 @@
 from collections.abc import Callable
 from typing import Protocol
 
-from app.schemas.qa import FoundationContext, QARunResult, QARunStage, QARunState, QARunStatus
-from app.services.qa_providers import AIProvider
+from app.schemas.qa import (
+    FoundationContext,
+    QARunResult,
+    QARunStage,
+    QARunState,
+    QARunStatus,
+    QATriggerType,
+)
+from app.services.qa_providers import AIProvider, MockTestPlanningProvider, TestPlanningProvider
 from app.services.change_impact import ChangeImpactAnalyzer
+from app.schemas.test_plan import bind_test_plan, build_test_planning_input
 
 
 class ProgressCallback(Protocol):
@@ -58,6 +66,36 @@ class ChangeImpactAnalysisStage:
         )
 
 
+class TestPlanningStage:
+    name = "test_planning"
+    status = QARunStatus.PLANNING
+    progress = 50
+    requires_github_context = True
+    github_only = True
+
+    def __init__(self, provider: TestPlanningProvider | None = None) -> None:
+        self.provider = provider or MockTestPlanningProvider()
+
+    async def execute(self, state: QARunState, _provider: AIProvider) -> QARunStage:
+        state.test_plan = None
+        if state.trigger_type != QATriggerType.GITHUB_PULL_REQUEST or state.github_context is None:
+            raise RuntimeError("GitHub context is missing for test planning")
+        if state.change_impact_analysis is None:
+            raise RuntimeError("Deterministic change-impact analysis is missing for test planning")
+
+        planning_input = build_test_planning_input(state.github_context, state.change_impact_analysis)
+        proposal = await self.provider.create_test_plan_proposal(planning_input)
+        bound_plan = bind_test_plan(state.github_context, state.change_impact_analysis, proposal)
+        state.test_plan = bound_plan
+        return QARunStage(
+            name=self.name,
+            summary=(
+                f"Produced {len(bound_plan.cases)} suggested test cases; "
+                f"{bound_plan.omitted_suite_count} eligible suites omitted by the case limit. No tests were run."
+            ),
+        )
+
+
 class PlanningStage:
     name = "foundation_plan"
     status = QARunStatus.PLANNING
@@ -92,8 +130,19 @@ class QAWorkflow(Protocol):
 class FoundationWorkflow:
     """Minimal offline workflow with replaceable, ordered stages."""
 
-    def __init__(self, stages: tuple[WorkflowStage, ...] | None = None) -> None:
-        self.stages = stages or (ContextStage(), ChangeImpactAnalysisStage(), PlanningStage(), ReportStage())
+    def __init__(
+        self,
+        stages: tuple[WorkflowStage, ...] | None = None,
+        *,
+        test_planning_provider: TestPlanningProvider | None = None,
+    ) -> None:
+        self.stages = stages or (
+            ContextStage(),
+            ChangeImpactAnalysisStage(),
+            TestPlanningStage(test_planning_provider),
+            PlanningStage(),
+            ReportStage(),
+        )
 
     async def execute(
         self,
@@ -102,6 +151,8 @@ class FoundationWorkflow:
         on_progress: ProgressCallback,
     ) -> QARunResult:
         for stage in self.stages:
+            if getattr(stage, "github_only", False) and state.trigger_type != QATriggerType.GITHUB_PULL_REQUEST:
+                continue
             if getattr(stage, "requires_github_context", False) and state.github_context is None:
                 continue
             state.status = stage.status
@@ -117,11 +168,12 @@ class FoundationWorkflow:
         if state.github_context is None:
             summary = "Foundation workflow completed. No pull request analysis or test execution was performed."
         else:
-            summary = "Deterministic pull request change-impact analysis completed. No tests were executed."
+            summary = "Deterministic pull request change-impact analysis and suggested test planning completed. No tests were executed."
         return QARunResult(
             summary=summary,
             context=state.context,
             plan=state.plan,
             stages=state.stages,
             change_impact_analysis=state.change_impact_analysis,
+            test_plan=state.test_plan,
         )

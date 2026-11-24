@@ -73,10 +73,12 @@ def test_successful_run_persists_progress_state_result_and_duration(qa_store):
     assert len(persisted.result["stages"]) == 3
     assert persisted.state_data["change_impact_analysis"] is None
     assert persisted.result["change_impact_analysis"] is None
+    assert persisted.state_data["test_plan"] is None
+    assert persisted.result["test_plan"] is None
     assert QARunStatus(persisted.state_data["status"]) == QARunStatus.COMPLETED
 
 
-def github_context() -> GitHubPRContext:
+def github_context(*, head_sha: str = "b" * 40) -> GitHubPRContext:
     return GitHubPRContext(
         repository_id=123456789,
         repository_full_name="acme/widget",
@@ -91,7 +93,7 @@ def github_context() -> GitHubPRContext:
         source_branch="feature/update-qa-workflow",
         target_branch="main",
         base_sha="a" * 40,
-        head_sha="b" * 40,
+        head_sha=head_sha,
         changed_files=[GitHubChangedFile(
             path="apps/api/app/services/qa_workflow.py",
             status="modified",
@@ -132,6 +134,89 @@ def test_github_run_persists_change_impact_analysis_in_state_and_result(qa_store
     }
     assert persisted.result["change_impact_analysis"] == analysis
     assert persisted.result["test_execution"]["status"] == "not_run"
+    assert persisted.state_data["test_plan"]["approval_status"] == "suggested"
+    assert persisted.result["test_plan"] == persisted.state_data["test_plan"]
+    assert persisted.result["test_plan"]["revision"]["revision_id"] == persisted.github_revision_id
+
+
+def test_github_a_to_b_to_a_occurrences_keep_independent_test_plan_provenance(qa_store):
+    orchestrator = QARunOrchestrator(qa_store)
+    base_context = github_context()
+    contexts = (
+        base_context.model_copy(update={
+            "revision_id": "44444444-4444-4444-8444-444444444444",
+            "delivery_id": "occurrence-a1",
+        }),
+        base_context.model_copy(update={
+            "head_sha": "c" * 40,
+            "revision_id": "55555555-5555-4555-8555-555555555555",
+            "delivery_id": "occurrence-b",
+        }),
+        base_context.model_copy(update={
+            "revision_id": "66666666-6666-4666-8666-666666666666",
+            "delivery_id": "occurrence-a2",
+        }),
+    )
+    run_ids = []
+    for context in contexts:
+        db = qa_store()
+        try:
+            run = orchestrator.create(
+                db,
+                CreateQARunRequest(),
+                None,
+                github_context=context,
+                trigger_type=QATriggerType.GITHUB_PULL_REQUEST,
+            )
+            run_ids.append(run.id)
+        finally:
+            db.close()
+        orchestrator.execute(run.id)
+
+    persisted = [load_run(qa_store, run_id) for run_id in run_ids]
+    revision_ids = [run.result["test_plan"]["revision"]["revision_id"] for run in persisted]
+    assert revision_ids == [context.revision_id for context in contexts]
+    assert revision_ids[0] != revision_ids[2]
+    assert persisted[0].result["test_plan"]["cases"] == persisted[2].result["test_plan"]["cases"]
+
+
+def test_stored_context_mismatch_prevents_test_planner_invocation(qa_store):
+    class RecordingPlanner:
+        calls = 0
+
+        async def create_test_plan_proposal(self, _planning_input):
+            self.calls += 1
+            raise AssertionError("planner must not be invoked")
+
+    planner = RecordingPlanner()
+    orchestrator = QARunOrchestrator(
+        qa_store,
+        workflow=FoundationWorkflow(test_planning_provider=planner),
+    )
+    db = qa_store()
+    try:
+        run = orchestrator.create(
+            db,
+            CreateQARunRequest(),
+            None,
+            github_context=github_context(),
+            trigger_type=QATriggerType.GITHUB_PULL_REQUEST,
+        )
+        state = dict(run.state_data)
+        state["github_context"] = github_context(head_sha="c" * 40).model_dump(mode="json")
+        run.state_data = state
+        db.commit()
+    finally:
+        db.close()
+
+    orchestrator.execute(run.id)
+
+    persisted = load_run(qa_store, run.id)
+    assert persisted.status == QARunStatus.FAILED.value
+    assert persisted.result is None
+    assert persisted.state_data["test_plan"] is None
+    assert persisted.error["code"] == "workflow_failed"
+    assert planner.calls == 0
 
 
 class FailingImpactAnalyzer:
@@ -269,6 +354,45 @@ def test_cancel_after_final_progress_wins_over_successful_finalization(qa_store)
     assert persisted.state_data["cancellation_requested"] is True
 
 
+def test_cancellation_after_test_planning_clears_the_suggested_plan(qa_store):
+    class CancelAfterWorkflow:
+        def __init__(self, factory, run_id):
+            self.workflow = FoundationWorkflow()
+            self.factory = factory
+            self.run_id = run_id
+
+        async def execute(self, state, provider, on_progress):
+            result = await self.workflow.execute(state, provider, on_progress)
+            assert state.test_plan is not None
+            db = self.factory()
+            try:
+                QARunOrchestrator(self.factory).request_cancel(db, self.run_id)
+            finally:
+                db.close()
+            return result
+
+    orchestrator = QARunOrchestrator(qa_store)
+    db = qa_store()
+    try:
+        run = orchestrator.create(
+            db,
+            CreateQARunRequest(),
+            None,
+            github_context=github_context(),
+            trigger_type=QATriggerType.GITHUB_PULL_REQUEST,
+        )
+    finally:
+        db.close()
+    orchestrator.workflow = CancelAfterWorkflow(qa_store, run.id)
+
+    orchestrator.execute(run.id)
+
+    persisted = load_run(qa_store, run.id)
+    assert persisted.status == QARunStatus.CANCELLED.value
+    assert persisted.result is None
+    assert persisted.state_data["test_plan"] is None
+
+
 def test_terminal_run_is_not_overwritten_by_late_finalization(qa_store):
     orchestrator = QARunOrchestrator(qa_store)
     run = create_run(qa_store, orchestrator)
@@ -324,6 +448,128 @@ def test_provider_failure_marks_run_failed_without_exposing_exception(qa_store):
         "message": "The QA foundation workflow could not be completed.",
     }
     assert "provider details" not in str(persisted.error)
+
+
+@pytest.mark.parametrize("outcome", ["exception", "cancel", "invalid"])
+def test_github_planner_failure_or_self_cancellation_is_generic_and_clears_plan(qa_store, outcome):
+    class UnsuccessfulPlanner:
+        async def create_test_plan_proposal(self, _planning_input):
+            if outcome == "cancel":
+                raise asyncio.CancelledError
+            if outcome == "invalid":
+                return {"cases": [{"shell_command": "pytest"}]}
+            raise RuntimeError("private planning provider details")
+
+    orchestrator = QARunOrchestrator(
+        qa_store,
+        workflow=FoundationWorkflow(test_planning_provider=UnsuccessfulPlanner()),
+    )
+    db = qa_store()
+    try:
+        run = orchestrator.create(
+            db,
+            CreateQARunRequest(),
+            None,
+            github_context=github_context(),
+            trigger_type=QATriggerType.GITHUB_PULL_REQUEST,
+        )
+    finally:
+        db.close()
+
+    orchestrator.execute(run.id)
+
+    persisted = load_run(qa_store, run.id)
+    assert persisted.status == QARunStatus.FAILED.value
+    assert persisted.result is None
+    assert persisted.state_data["test_plan"] is None
+    assert persisted.error == {
+        "code": "workflow_failed",
+        "message": "The QA foundation workflow could not be completed.",
+    }
+
+
+def test_github_planner_timeout_is_timed_out_and_clears_plan(qa_store):
+    class SlowPlanner:
+        async def create_test_plan_proposal(self, _planning_input):
+            await asyncio.sleep(2)
+
+    orchestrator = QARunOrchestrator(
+        qa_store,
+        workflow=FoundationWorkflow(test_planning_provider=SlowPlanner()),
+    )
+    db = qa_store()
+    try:
+        run = orchestrator.create(
+            db,
+            CreateQARunRequest(config={"timeout_seconds": 1}),
+            None,
+            github_context=github_context(),
+            trigger_type=QATriggerType.GITHUB_PULL_REQUEST,
+        )
+    finally:
+        db.close()
+
+    # The workflow deadline is shortened deterministically after the run claim.
+    clock_values = iter((0.0, 0.9, 0.9, 0.9, 0.9, 0.9, 0.9, 0.9, 0.9, 0.9))
+    orchestrator.monotonic_clock = lambda: next(clock_values, 0.9)
+    orchestrator.execute(run.id)
+
+    persisted = load_run(qa_store, run.id)
+    assert persisted.status == QARunStatus.TIMED_OUT.value
+    assert persisted.result is None
+    assert persisted.state_data["test_plan"] is None
+    assert persisted.error["code"] == "timed_out"
+
+
+def test_cancellation_resistant_planner_delays_deadline_until_cooperative_exit(qa_store):
+    cancellation_seen = threading.Event()
+    release_provider = threading.Event()
+
+    class CancellationResistantPlanner:
+        async def create_test_plan_proposal(self, _planning_input):
+            try:
+                await asyncio.Event().wait()
+            except asyncio.CancelledError:
+                cancellation_seen.set()
+                await asyncio.to_thread(release_provider.wait, 2)
+                raise
+
+    orchestrator = QARunOrchestrator(
+        qa_store,
+        workflow=FoundationWorkflow(test_planning_provider=CancellationResistantPlanner()),
+    )
+    db = qa_store()
+    try:
+        run = orchestrator.create(
+            db,
+            CreateQARunRequest(config={"timeout_seconds": 1}),
+            None,
+            github_context=github_context(),
+            trigger_type=QATriggerType.GITHUB_PULL_REQUEST,
+        )
+    finally:
+        db.close()
+
+    # Keep the configured one-second run deadline but leave 200 ms once the
+    # workflow enters its wait_for boundary, enough to reach the provider.
+    clock_values = iter((0.0, 0.8, 0.8, 0.8, 0.8, 0.8, 0.8))
+    orchestrator.monotonic_clock = lambda: next(clock_values, 0.8)
+    worker = threading.Thread(target=orchestrator.execute, args=(run.id,))
+    worker.start()
+    try:
+        assert cancellation_seen.wait(timeout=2)
+        # wait_for waits for the provider's cancellation handler; it does not
+        # abandon that task or falsely report completion.
+        assert worker.is_alive()
+    finally:
+        release_provider.set()
+        worker.join(timeout=2)
+
+    assert not worker.is_alive()
+    persisted = load_run(qa_store, run.id)
+    assert persisted.status == QARunStatus.TIMED_OUT.value
+    assert persisted.result is None
+    assert persisted.state_data["test_plan"] is None
 
 
 class BrokenStage:

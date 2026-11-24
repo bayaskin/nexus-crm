@@ -17,3 +17,5 @@ allure-report/
 .vscode/
 .DS_Store
 .venv/
+# TypeScript incremental build cache
+*.tsbuildinfo

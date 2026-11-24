@@ -210,6 +210,7 @@ class QARunOrchestrator:
         ).model_dump(mode="json")
         if state:
             state.status = QARunStatus.TIMED_OUT
+            state.test_plan = None
             run.state_data = state.model_dump(mode="json")
         db.commit()
         db.refresh(run)
@@ -220,6 +221,12 @@ class QARunOrchestrator:
             run = db.get(QARun, run_id)
             if run is None or QARunStatus(run.status) != QARunStatus.PENDING:
                 return
+            stored_github_context = dict(run.github_context) if run.github_context else None
+            stored_github_revision_id = run.github_revision_id
+            stored_github_repository_id = run.github_repository_id
+            stored_github_pr_number = run.github_pr_number
+            stored_github_head_sha = run.github_head_sha
+            stored_trigger_type = QATriggerType(run.trigger_type)
             started_monotonic = self.monotonic_clock()
             deadline = started_monotonic + run.timeout_seconds
             state = QARunState.model_validate(run.state_data)
@@ -286,6 +293,15 @@ class QARunOrchestrator:
                 progress_db.close()
 
         async def run_workflow() -> QARunResult:
+            self._verify_stored_github_context(
+                state,
+                stored_trigger_type,
+                stored_github_context,
+                stored_github_revision_id,
+                stored_github_repository_id,
+                stored_github_pr_number,
+                stored_github_head_sha,
+            )
             remaining = max(0.001, deadline - self.monotonic_clock())
             return await asyncio.wait_for(
                 self.workflow.execute(state, self.provider, persist_progress),
@@ -297,6 +313,16 @@ class QARunOrchestrator:
             state.status = transition_status(state.status, QARunStatus.COMPLETED)
             state.progress = 100
             self._finish(run_id, state, result=result)
+        except asyncio.CancelledError:
+            # A provider cancellation without a persisted user cancellation is
+            # a generic workflow failure. _finish still gives a committed
+            # cancel request precedence over this outcome.
+            state.status = QARunStatus.FAILED
+            self._finish(
+                run_id,
+                state,
+                error=QARunError(code="workflow_failed", message="The QA foundation workflow could not be completed."),
+            )
         except QARunCancelled:
             state.status = QARunStatus.CANCELLED
             state.cancellation_requested = True
@@ -307,6 +333,34 @@ class QARunOrchestrator:
         except Exception:
             state.status = QARunStatus.FAILED
             self._finish(run_id, state, error=QARunError(code="workflow_failed", message="The QA foundation workflow could not be completed."))
+
+    @staticmethod
+    def _verify_stored_github_context(
+        state: QARunState,
+        stored_trigger_type: QATriggerType,
+        stored_context_data: dict | None,
+        stored_revision_id: str | None,
+        stored_repository_id: int | None,
+        stored_pr_number: int | None,
+        stored_head_sha: str | None,
+    ) -> None:
+        if state.trigger_type != stored_trigger_type:
+            raise ValueError("Stored QA trigger type is inconsistent")
+        if stored_trigger_type != QATriggerType.GITHUB_PULL_REQUEST:
+            return
+        context = state.github_context
+        if context is None or stored_context_data is None:
+            raise ValueError("Stored GitHub revision context is missing")
+        stored_context = GitHubPRContext.model_validate(stored_context_data)
+        if context.model_dump(mode="json") != stored_context.model_dump(mode="json"):
+            raise ValueError("Stored GitHub revision context is inconsistent")
+        if (
+            context.revision_id != stored_revision_id
+            or context.repository_id != stored_repository_id
+            or context.pull_request_number != stored_pr_number
+            or context.head_sha != stored_head_sha
+        ):
+            raise ValueError("Stored GitHub revision identifiers are inconsistent")
 
     def _finish(
         self,
@@ -338,6 +392,9 @@ class QARunOrchestrator:
                 final_state.cancellation_requested = True
                 final_error = QARunError(code="cancelled", message="Run cancelled by request.").model_dump(mode="json")
                 final_result = None
+
+            if final_status != QARunStatus.COMPLETED:
+                final_state.test_plan = None
 
             final_state.progress = 100 if final_status == QARunStatus.COMPLETED else run.progress
             values = {
@@ -372,6 +429,7 @@ class QARunOrchestrator:
             cancelled_state = QARunState.model_validate(run.state_data)
             cancelled_state.status = QARunStatus.CANCELLED
             cancelled_state.cancellation_requested = True
+            cancelled_state.test_plan = None
             cancelled_error = QARunError(code="cancelled", message="Run cancelled by request.").model_dump(mode="json")
             cancelled_at = self.clock()
             db.execute(

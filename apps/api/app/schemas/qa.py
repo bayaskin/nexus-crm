@@ -7,6 +7,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from app.schemas.change_impact import ChangeImpactAnalysis
 from app.schemas.github import GitHubPRContext
+from app.schemas.test_plan import TestPlan
 
 
 class QARunStatus(StrEnum):
@@ -95,6 +96,7 @@ class QARunState(BaseModel):
     cancellation_requested: bool = False
     github_context: GitHubPRContext | None = None
     change_impact_analysis: ChangeImpactAnalysis | None = None
+    test_plan: TestPlan | None = None
 
 
 class QARunResult(BaseModel):
@@ -106,6 +108,7 @@ class QARunResult(BaseModel):
     stages: list[QARunStage]
     change_impact_analysis: ChangeImpactAnalysis | None = None
     test_execution: TestExecutionResult = Field(default_factory=TestExecutionResult)
+    test_plan: TestPlan | None = None
 
 
 class QARunError(BaseModel):
