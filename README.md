@@ -103,6 +103,26 @@ docker compose --project-name nexus-qa --env-file .env.qa -f docker-compose.qa.y
 docker compose --project-name nexus-qa --env-file .env.qa -f docker-compose.qa.yml --profile test run --rm qa-unit-tests
 ```
 
+### Disposable MySQL admission concurrency tests
+
+The Phase 3A MySQL concurrency suite must not run against the persistent `nexus-qa` database. Use the separate `docker-compose.qa-admission-test.yml` stack and the exact `nexus-qa-admission-test` project identity below. Its MySQL service stores `/var/lib/mysql` only in container tmpfs; the stack declares no named or bind-mounted database volume, publishes no ports, and joins only its own internal network. The guard checks the QA test marker and Compose project identity and refuses `nexus-qa`, `nexus-platform`, and any other project. Its API and migration containers use a checked-in, public test-only JWT signing key that is not used by development, persistent QA, or production services. Do not use the ordinary QA Compose file for this suite.
+
+Build the guarded migration and test images, initialize only the disposable schema, then run the fixed concurrency test:
+
+```bash
+QA_ADMISSION_TEST_PROJECT=nexus-qa-admission-test COMPOSE_PROJECT_NAME=nexus-qa-admission-test docker compose --project-name nexus-qa-admission-test --env-file .env.qa -f docker-compose.qa-admission-test.yml --profile admission build qa-admission-migrate qa-admission-mysql-tests
+QA_ADMISSION_TEST_PROJECT=nexus-qa-admission-test COMPOSE_PROJECT_NAME=nexus-qa-admission-test docker compose --project-name nexus-qa-admission-test --env-file .env.qa -f docker-compose.qa-admission-test.yml --profile admission run --rm qa-admission-migrate
+QA_ADMISSION_TEST_PROJECT=nexus-qa-admission-test COMPOSE_PROJECT_NAME=nexus-qa-admission-test docker compose --project-name nexus-qa-admission-test --env-file .env.qa -f docker-compose.qa-admission-test.yml --profile admission run --rm qa-admission-mysql-tests
+```
+
+The test creates uniquely identified synthetic users, revisions, runs, and admissions. Normal test cleanup deletes only those records and restores the prior capacity limit and count. If the test process is interrupted before cleanup, stop and remove the disposable project with the matching guarded project/file arguments; the tmpfs database is discarded with its MySQL container, so no cleanup or restart can alter the persistent QA database:
+
+```bash
+QA_ADMISSION_TEST_PROJECT=nexus-qa-admission-test COMPOSE_PROJECT_NAME=nexus-qa-admission-test docker compose --project-name nexus-qa-admission-test --env-file .env.qa -f docker-compose.qa-admission-test.yml down --remove-orphans
+```
+
+Do not add `--volumes` or change the project/file arguments. The disposable stack declares no database volume to remove.
+
 Stop the QA services without deleting test data:
 
 ```bash
@@ -161,11 +181,13 @@ The API reads `SMTP_HOST`, `SMTP_PORT`, `SMTP_FROM`, and `APP_LOGIN_URL` from en
 
 ### Milestone 5 suite registry and execution policy
 
-The backend owns a version-controlled, immutable QA suite registry in `apps/api/app/services/qa_suite_registry.py`. It defines `unit-backend`, `api-auth`, `api-regression`, and `ui-regression`, each with a fixed QA runner service, repository-relative test selectors, timeout ceiling, description, and enabled flag. The selectors correspond to the guarded unit, API, and UI test services in `docker-compose.qa.yml`; they are trusted metadata for a future runner and are not executed by this milestone.
+The backend owns a version-controlled QA suite registry in `apps/api/app/services/qa_suite_registry.py`. It defines `unit-backend`, `api-auth`, `api-regression`, and `ui-regression`, each with a fixed QA runner service, repository-relative test selectors, timeout ceiling, description, and enabled flag. Selectors are trusted metadata; they are never accepted from requests or generated plans.
 
-The pure execution policy accepts registered suite IDs and a bounded timeout request. It rejects unknown or disabled suites, arbitrary command/selector/Docker/environment fields, invalid QA environment descriptors, development database/service targets, excessive timeouts, and requests at the configured concurrency limit. Decisions contain safe reason codes and trusted selectors, never a shell command or caller-supplied value. The QA environment descriptor contains no credentials and must be assembled by trusted application configuration. Planning text and provider output remain untrusted suggestions; they cannot define registry entries, selectors, services, or environment values. Current Milestone 4 plans cite deterministic candidate-suite evidence paths, so a future integration must explicitly map validated plan and impact evidence to these stable registry IDs rather than interpreting case text or treating path references as commands.
+The pure execution policy rejects unknown or disabled suites, arbitrary command/selector/Docker/environment fields, invalid QA environment descriptors, development database/service targets, excessive timeouts, and requests at the configured concurrency limit. Decisions contain safe reason codes and trusted selectors, never a shell command or caller-supplied value. Planning text and provider output remain untrusted display data.
 
-This is a policy decision only: it does not reserve concurrency or launch containers. Phase 3 must add an atomic concurrency reservation, a fixed service/selector-to-launcher mapping, cancellation and timeout cleanup, and end-to-end isolation checks before any suite can execute. The execution entrypoint must preserve the existing QA guard and must not accept agent-controlled Docker arguments, command strings, filesystem paths, or environment overrides.
+The Phase 3A endpoint `POST /api/v1/qa/runs/{run_id}/admissions` requires `qa:execute` and accepts only a stable suite ID plus an optional bounded timeout. It revalidates the completed GitHub run's stored revision, deterministic impact analysis, and bound suggested plan, then maps cited candidate-suite evidence through a static allowlist. It derives the target environment from server-owned configuration and reserves one of the durable global capacity slots. The public response omits runner service identifiers and selectors. Denials are persisted without consuming a slot.
+
+An unstarted reservation expires after five minutes and is reclaimed during a later admission request or by the internal recovery method. The HTTP request ending does not release capacity. Phase 3A can mark a reservation running or release a confirmed terminal state, but it does not start a runner. Running reservations are deliberately not auto-expired: Phase 3B must verify the runner has stopped after a crash before releasing its slot. Admissions and denials are retained; the migration refuses to downgrade while that history exists. The API and UI guard commands currently run their full fixed suites, so Phase 3B must add a fixed, guarded selector-to-command mapping before using the registry selectors. Phase 3B also owns actual runner launch, process supervision, cancellation, and crash reconciliation. No agent-controlled Docker arguments, command strings, paths, or environment overrides may reach that launcher.
 
 The first QA foundation exposes authenticated run management at `POST /api/v1/qa/runs`, `GET /api/v1/qa/runs`, `GET /api/v1/qa/runs/{run_id}`, and `POST /api/v1/qa/runs/{run_id}/cancel`. Starting and cancelling runs requires `qa:execute`; listing and viewing runs requires `qa:read`. These permissions are checked by the API. Apply the Alembic migration with `docker compose exec api alembic upgrade head` before using the endpoints.
 

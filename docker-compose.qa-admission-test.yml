@@ -1,0 +1,82 @@
+name: nexus-qa-admission-test
+
+x-admission-guard: &admission-guard
+  volumes:
+    - ./infra/qa/qa-guard.sh:/qa/qa-guard.sh:ro
+
+x-admission-db-environment: &admission-db-environment
+  APP_ENV: test
+  DATABASE_URL: mysql+pymysql://${QA_DATABASE_USER:?Set QA_DATABASE_USER}:${QA_DATABASE_PASSWORD:?Set QA_DATABASE_PASSWORD}@qa-mysql:3306/nexus_qa_test
+  # Public test-only signing key. It is deliberately unrelated to deployment keys.
+  JWT_SECRET_KEY: "8f3c2a91d6e7405b9c1f2a8e4d7b6031a5e9c2d8f4b7106cc3e5a9d2f8b41670"
+  QA_DATABASE_NAME: ${QA_DATABASE_NAME:?Set QA_DATABASE_NAME}
+  QA_DATABASE_HOST: qa-mysql
+  QA_DATABASE_USER: ${QA_DATABASE_USER:?Set QA_DATABASE_USER}
+  QA_DATABASE_PASSWORD: ${QA_DATABASE_PASSWORD:?Set QA_DATABASE_PASSWORD}
+  QA_ADMISSION_TEST_PROJECT: ${QA_ADMISSION_TEST_PROJECT:?Set QA_ADMISSION_TEST_PROJECT}
+  QA_ADMISSION_COMPOSE_PROJECT: ${COMPOSE_PROJECT_NAME:?Set the dedicated Compose project name}
+  QA_ADMISSION_DB_STORAGE: tmpfs
+
+services:
+  qa-admission-db:
+    image: mysql:8.4
+    environment:
+      MYSQL_ROOT_PASSWORD: ${QA_MYSQL_ROOT_PASSWORD:?Set QA_MYSQL_ROOT_PASSWORD}
+      MYSQL_DATABASE: nexus_qa_test
+      MYSQL_USER: ${QA_DATABASE_USER:?Set QA_DATABASE_USER}
+      MYSQL_PASSWORD: ${QA_DATABASE_PASSWORD:?Set QA_DATABASE_PASSWORD}
+    tmpfs:
+      - /var/lib/mysql
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - >-
+          set -eu;
+          client_config=$$(mktemp);
+          trap 'rm -f "$$client_config"' EXIT;
+          (umask 077; printf '[client]\nprotocol=TCP\nhost=127.0.0.1\nuser=%s\npassword=%s\n' "$$MYSQL_USER" "$$MYSQL_PASSWORD" > "$$client_config");
+          selected_database=$$(mysql --defaults-extra-file="$$client_config" --database=nexus_qa_test --batch --skip-column-names --execute='SELECT DATABASE()');
+          [ "$$selected_database" = "nexus_qa_test" ]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+      start_period: 20s
+    networks:
+      qa_admission_isolated:
+        aliases: [qa-mysql]
+
+  qa-admission-migrate:
+    <<: *admission-guard
+    profiles: [admission]
+    build:
+      context: ./apps/api
+      dockerfile: Dockerfile
+    environment:
+      <<: *admission-db-environment
+    entrypoint: ["/bin/sh", "/qa/qa-guard.sh", "qa_admission_migrate"]
+    command: []
+    depends_on:
+      qa-admission-db:
+        condition: service_healthy
+    networks: [qa_admission_isolated]
+
+  qa-admission-mysql-tests:
+    <<: *admission-guard
+    profiles: [admission]
+    build:
+      context: ./apps/api
+      dockerfile: Dockerfile.qa-admission-tests
+    environment:
+      <<: *admission-db-environment
+      MYSQL_TEST_DATABASE_URL: mysql+pymysql://${QA_DATABASE_USER:?Set QA_DATABASE_USER}:${QA_DATABASE_PASSWORD:?Set QA_DATABASE_PASSWORD}@qa-mysql:3306/nexus_qa_test
+      MYSQL_TEST_DATABASE_KIND: disposable
+    entrypoint: ["/bin/sh", "/qa/qa-guard.sh", "qa_admission_mysql_test"]
+    command: []
+    depends_on:
+      qa-admission-db:
+        condition: service_healthy
+    networks: [qa_admission_isolated]
+
+networks:
+  qa_admission_isolated:
+    internal: true

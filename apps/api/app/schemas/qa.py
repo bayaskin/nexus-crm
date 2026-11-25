@@ -1,6 +1,6 @@
 from datetime import datetime
 from enum import StrEnum
-from typing import Literal
+from typing import Annotated, Literal
 from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field
@@ -27,6 +27,56 @@ class QARunStatus(StrEnum):
 class QATriggerType(StrEnum):
     MANUAL = "manual"
     GITHUB_PULL_REQUEST = "github_pull_request"
+
+
+class QAExecutionAdmissionState(StrEnum):
+    RESERVED = "reserved"
+    RUNNING = "running"
+    COMPLETED = "completed"
+    FAILED = "failed"
+    CANCELLED = "cancelled"
+    EXPIRED = "expired"
+    DENIED = "denied"
+
+
+QAAdmissionReasonCode = Literal[
+    "unauthorized",
+    "plan_unavailable",
+    "evidence_invalid",
+    "suite_not_suggested",
+    "reservation_expired",
+    "runner_failed",
+    "invalid_request",
+    "unsupported_override",
+    "unknown_suite",
+    "suite_disabled",
+    "unsafe_environment",
+    "timeout_exceeded",
+    "concurrency_limit",
+    "registry_invalid",
+    "policy_config_invalid",
+    "incompatible_suites",
+]
+
+
+class CreateQAExecutionAdmissionRequest(BaseModel):
+    """A suite selection only; runner and environment settings are forbidden."""
+
+    model_config = ConfigDict(extra="forbid", strict=True, frozen=True)
+
+    suite_id: Annotated[str, Field(pattern=r"^[a-z][a-z0-9-]{1,63}$", max_length=64)]
+    requested_timeout_seconds: int | None = Field(default=None, ge=1, le=3600)
+
+
+class QAExecutionAdmissionResponse(BaseModel):
+    admission_id: UUID
+    qa_run_id: UUID
+    suite_id: str
+    state: QAExecutionAdmissionState
+    reason_code: QAAdmissionReasonCode | None = None
+    timeout_seconds: int | None = Field(default=None, ge=1, le=3600)
+    created_at: datetime
+    reserved_until: datetime | None = None
 
 
 class QARunConfig(BaseModel):

@@ -59,6 +59,14 @@ def test_trusted_registry_contains_expected_stable_suites_and_fixed_selectors():
         "tests/test_reset_qa_admin.py",
         "tests/test_migrate_qa_admin_email.py",
         "tests/test_auth_login.py",
+        "tests/test_permission_resolution.py",
+        "tests/test_user_delivery.py",
+        "tests/test_qa_foundation.py",
+        "tests/test_qa_orchestrator.py",
+        "tests/test_qa_api.py",
+        "tests/test_qa_github.py",
+        "tests/test_qa_change_impact.py",
+        "tests/test_config.py",
     )
     assert not hasattr(decision, "command")
 
@@ -206,6 +214,15 @@ def test_same_request_is_deterministic_independent_of_suite_order():
     second = evaluate_execution_policy(_request("api-auth", "api-regression"), **kwargs)
     assert first == second
     assert first.suite_ids == ("api-auth", "api-regression")
+
+
+def test_default_registry_and_candidate_mapping_cannot_be_mutated():
+    from app.services.qa_suite_registry import CANDIDATE_SUITE_EXECUTION_MAP
+
+    with pytest.raises(AttributeError):
+        DEFAULT_SUITE_REGISTRY._definitions = {}  # type: ignore[misc]
+    with pytest.raises(TypeError):
+        CANDIDATE_SUITE_EXECUTION_MAP["apps/api/tests/attacker.py"] = ("api-auth",)  # type: ignore[index]
 
 
 def test_incompatible_runner_suites_are_denied_and_invalid_environment_shape_fails_closed():

@@ -26,7 +26,7 @@ if [ "$#" -eq 0 ]; then
 fi
 shift
 case "$mode" in
-    config|api|migrate|bootstrap|reset_admin|migrate_admin_email|api_test|ui_test|qa_unit_test) ;;
+    config|api|migrate|bootstrap|reset_admin|migrate_admin_email|api_test|ui_test|qa_unit_test|qa_admission_migrate|qa_admission_mysql_test) ;;
     *) fail "Unknown QA safety-check mode" ;;
 esac
 
@@ -38,6 +38,13 @@ validate_database_target() {
     require_hex_secret QA_DATABASE_PASSWORD "$password" 64
     expected_url="mysql+pymysql://nexus_qa_runner:${password}@qa-mysql:3306/nexus_qa_test"
     [ "${DATABASE_URL:-}" = "$expected_url" ] || fail "DATABASE_URL must target the isolated QA database"
+}
+
+validate_admission_test_project() {
+    expected_project=nexus-qa-admission-test
+    [ "${QA_ADMISSION_TEST_PROJECT:-}" = "$expected_project" ] || fail "QA admission tests require the dedicated disposable project marker"
+    [ "${QA_ADMISSION_COMPOSE_PROJECT:-}" = "$expected_project" ] || fail "QA admission tests refuse persistent QA or development Compose projects"
+    [ "${QA_ADMISSION_DB_STORAGE:-}" = "tmpfs" ] || fail "QA admission MySQL must use disposable tmpfs storage"
 }
 
 if [ "$mode" = "config" ]; then
@@ -73,7 +80,7 @@ if [ "$mode" = "qa_unit_test" ]; then
     [ "${DATABASE_URL:-}" = "sqlite+pysqlite:///:memory:" ] || fail "Backend unit tests must use in-memory SQLite"
     [ -z "${QA_DATABASE_PASSWORD:-}" ] && [ -z "${DB_PASSWORD:-}" ] && [ -z "${MYSQL_TEST_DATABASE_URL:-}" ] && [ -z "${MYSQL_TEST_DATABASE_KIND:-}" ] || fail "Backend unit tests must not receive MySQL credentials or URLs"
     [ -z "${DB_HOST:-}" ] && [ -z "${DB_USER:-}" ] && [ -z "${DB_NAME:-}" ] && [ -z "${QA_DATABASE_HOST:-}" ] && [ -z "${QA_DATABASE_USER:-}" ] && [ -z "${QA_DATABASE_NAME:-}" ] || fail "Backend unit tests must not receive MySQL connection settings"
-    exec python -m pytest tests/test_reset_qa_admin.py tests/test_migrate_qa_admin_email.py tests/test_auth_login.py -v -p no:cacheprovider
+    exec python -m pytest tests/test_reset_qa_admin.py tests/test_migrate_qa_admin_email.py tests/test_auth_login.py tests/test_qa_execution_admissions.py -v -p no:cacheprovider
 fi
 
 validate_database_target
@@ -124,5 +131,21 @@ case "$mode" in
         require_hex_secret TEST_RBAC_PASSWORD "${TEST_RBAC_PASSWORD:-}" 64
         [ "$TEST_USER_PASSWORD" != "$TEST_RBAC_PASSWORD" ] || fail "QA administrator and RBAC test passwords must differ"
         exec pytest -q
+        ;;
+    qa_admission_migrate)
+        [ "$#" -eq 0 ] || fail "QA admission migration does not accept command or selector overrides"
+        validate_admission_test_project
+        [ "${APP_ENV:-}" = "test" ] || fail "QA admission migration must use APP_ENV=test"
+        require_hex_secret JWT_SECRET_KEY "${JWT_SECRET_KEY:-}" 64
+        exec alembic upgrade head
+        ;;
+    qa_admission_mysql_test)
+        [ "$#" -eq 0 ] || fail "QA admission tests do not accept command or selector overrides"
+        validate_admission_test_project
+        [ "${APP_ENV:-}" = "test" ] || fail "QA admission integration tests must use APP_ENV=test"
+        require_hex_secret JWT_SECRET_KEY "${JWT_SECRET_KEY:-}" 64
+        [ "${MYSQL_TEST_DATABASE_KIND:-}" = "disposable" ] || fail "MySQL test database must be marked disposable"
+        [ "${MYSQL_TEST_DATABASE_URL:-}" = "$expected_url" ] || fail "QA admission tests must target the isolated QA database"
+        exec python -m pytest tests/test_qa_execution_admissions_mysql.py -v -p no:cacheprovider
         ;;
 esac

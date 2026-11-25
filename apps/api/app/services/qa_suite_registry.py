@@ -133,6 +133,8 @@ class ExecutionDecision(_StrictFrozenModel):
 class SuiteRegistry:
     """Validated immutable registry built only from trusted application config."""
 
+    __slots__ = ("_definitions",)
+
     def __init__(self, definitions: Sequence[SuiteDefinition | Mapping[str, object]] | None) -> None:
         if not definitions:
             raise ValueError("Suite registry configuration is missing or empty")
@@ -143,7 +145,10 @@ class SuiteRegistry:
         ids = tuple(item.suite_id for item in parsed)
         if len(ids) != len(set(ids)):
             raise ValueError("Suite registry contains duplicate IDs")
-        self._definitions = MappingProxyType({item.suite_id: item for item in parsed})
+        object.__setattr__(self, "_definitions", MappingProxyType({item.suite_id: item for item in parsed}))
+
+    def __setattr__(self, name: str, value: object) -> None:
+        raise AttributeError("SuiteRegistry is immutable")
 
     def get(self, suite_id: str) -> SuiteDefinition | None:
         return self._definitions.get(suite_id)
@@ -165,6 +170,14 @@ TRUSTED_SUITE_DEFINITIONS: tuple[SuiteDefinition, ...] = (
             "tests/test_reset_qa_admin.py",
             "tests/test_migrate_qa_admin_email.py",
             "tests/test_auth_login.py",
+            "tests/test_permission_resolution.py",
+            "tests/test_user_delivery.py",
+            "tests/test_qa_foundation.py",
+            "tests/test_qa_orchestrator.py",
+            "tests/test_qa_api.py",
+            "tests/test_qa_github.py",
+            "tests/test_qa_change_impact.py",
+            "tests/test_config.py",
         ),
         timeout_limit_seconds=300,
         enabled=True,
@@ -213,6 +226,24 @@ TRUSTED_SUITE_DEFINITIONS: tuple[SuiteDefinition, ...] = (
         enabled=True,
     ),
 )
+
+# Only maintained deterministic test evidence maps to stable suite IDs. The
+# MySQL-only QA migration/concurrency suite is deliberately unmapped because
+# qa-unit-tests has network_mode=none; no selector or command is derived from
+# any source path.
+CANDIDATE_SUITE_EXECUTION_MAP: Mapping[str, tuple[str, ...]] = MappingProxyType({
+    "apps/api/tests/test_permission_resolution.py": ("unit-backend", "api-auth"),
+    "apps/api/tests/test_user_delivery.py": (
+        "unit-backend", "api-auth", "api-regression",
+    ),
+    "apps/api/tests/test_qa_foundation.py": ("unit-backend",),
+    "apps/api/tests/test_qa_orchestrator.py": ("unit-backend",),
+    "apps/api/tests/test_qa_api.py": ("unit-backend",),
+    "apps/api/tests/test_qa_github.py": ("unit-backend",),
+    "apps/api/tests/test_qa_change_impact.py": ("unit-backend",),
+    "apps/api/tests/test_qa_github_mysql.py": (),
+    "apps/api/tests/test_config.py": ("unit-backend",),
+})
 
 DEFAULT_SUITE_REGISTRY = SuiteRegistry(TRUSTED_SUITE_DEFINITIONS)
 DEFAULT_EXECUTION_POLICY_CONFIG = ExecutionPolicyConfig(max_concurrent_executions=2)

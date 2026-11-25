@@ -1,13 +1,26 @@
 from uuid import UUID
 
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, status
+from fastapi.responses import JSONResponse
 from sqlalchemy.orm import Session
 
 from app.api.deps import require_permission
 from app.core.database import SessionLocal, get_db
 from app.models.identity import User
 from app.models.qa import QARun
-from app.schemas.qa import CreateQARunRequest, QARunError, QARunListResponse, QARunResponse, QARunResult, QARunState, QARunStatus, QARunConfig, QATriggerType
+from app.schemas.qa import (
+    CreateQAExecutionAdmissionRequest,
+    CreateQARunRequest,
+    QAExecutionAdmissionResponse,
+    QARunError,
+    QARunListResponse,
+    QARunResponse,
+    QARunResult,
+    QARunState,
+    QARunStatus,
+    QARunConfig,
+    QATriggerType,
+)
 from app.schemas.github import GitHubPRContext
 from app.services.qa_orchestrator import (
     InvalidQARunTransition,
@@ -15,12 +28,17 @@ from app.services.qa_orchestrator import (
     QARunNotFound,
     QARunOrchestrator,
 )
+from app.services.qa_admissions import AdmissionRunNotFound, QAAdmissionService
 
 router = APIRouter(prefix="/v1/qa/runs", tags=["agentic QA"])
 
 
 def get_qa_orchestrator() -> QARunOrchestrator:
     return QARunOrchestrator(SessionLocal)
+
+
+def get_qa_admission_service() -> QAAdmissionService:
+    return QAAdmissionService()
 
 
 def serialize_run(run: QARun) -> QARunResponse:
@@ -55,6 +73,42 @@ def create_run(
     run = orchestrator.create(db, payload, actor)
     background_tasks.add_task(orchestrator.execute, run.id)
     return serialize_run(run)
+
+
+@router.post(
+    "/{run_id}/admissions",
+    response_model=QAExecutionAdmissionResponse,
+    status_code=status.HTTP_202_ACCEPTED,
+    responses={409: {"model": QAExecutionAdmissionResponse}},
+)
+def admit_suite(
+    run_id: UUID,
+    payload: CreateQAExecutionAdmissionRequest,
+    db: Session = Depends(get_db),
+    actor: User = Depends(require_permission("qa", "execute")),
+    admission_service: QAAdmissionService = Depends(get_qa_admission_service),
+):
+    """Authorize and reserve a suggested suite; this endpoint never launches it."""
+
+    try:
+        admission = admission_service.admit(db, actor, run_id, payload)
+    except AdmissionRunNotFound:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="QA run not found") from None
+
+    response = QAExecutionAdmissionResponse(
+        admission_id=admission.id,
+        qa_run_id=admission.qa_run_id,
+        suite_id=admission.suite_id,
+        state=admission.state,
+        reason_code=admission.reason_code,
+        timeout_seconds=admission.timeout_seconds,
+        created_at=admission.created_at,
+        reserved_until=admission.reserved_until,
+    )
+    return JSONResponse(
+        status_code=(status.HTTP_409_CONFLICT if admission.state == "denied" else status.HTTP_202_ACCEPTED),
+        content=response.model_dump(mode="json"),
+    )
 
 
 @router.get("", response_model=QARunListResponse)
