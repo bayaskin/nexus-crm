@@ -1,0 +1,269 @@
+name: nexus-qa
+
+x-qa-runtime-environment: &qa-runtime-environment
+  APP_ENV: test
+  DATABASE_URL: mysql+pymysql://${QA_DATABASE_USER:?Set QA_DATABASE_USER}:${QA_DATABASE_PASSWORD:?Set QA_DATABASE_PASSWORD}@qa-mysql:3306/nexus_qa_test
+  QA_DATABASE_NAME: ${QA_DATABASE_NAME:?Set QA_DATABASE_NAME}
+  QA_DATABASE_HOST: qa-mysql
+  QA_DATABASE_USER: ${QA_DATABASE_USER:?Set QA_DATABASE_USER}
+  QA_DATABASE_PASSWORD: ${QA_DATABASE_PASSWORD:?Set QA_DATABASE_PASSWORD}
+  JWT_SECRET_KEY: ${QA_JWT_SECRET_KEY:?Set QA_JWT_SECRET_KEY}
+x-qa-api-environment: &qa-api-environment
+  <<: *qa-runtime-environment
+  EXPOSE_TEMPORARY_PASSWORDS: "false"
+  CORS_ORIGINS: http://proxy
+  SMTP_HOST: mailhog
+  SMTP_PORT: "1025"
+  SMTP_FROM: nexus-qa@localhost
+  APP_LOGIN_URL: http://proxy/login
+  GITHUB_TOKEN: ""
+  GITHUB_WEBHOOK_SECRET: ""
+  GITHUB_ALLOWED_REPOSITORIES: ""
+
+x-qa-guard: &qa-guard
+  volumes:
+    - ./infra/qa/qa-guard.sh:/qa/qa-guard.sh:ro
+
+services:
+  qa-config-check:
+    image: busybox:1.36
+    profiles: [tools]
+    <<: *qa-guard
+    entrypoint: ["/bin/sh", "/qa/qa-guard.sh", "config"]
+    command: []
+    environment:
+      QA_DATABASE_NAME: ${QA_DATABASE_NAME:?Set QA_DATABASE_NAME}
+      QA_DATABASE_HOST: qa-mysql
+      QA_DATABASE_USER: ${QA_DATABASE_USER:?Set QA_DATABASE_USER}
+      QA_DATABASE_PASSWORD: ${QA_DATABASE_PASSWORD:?Set QA_DATABASE_PASSWORD}
+      QA_MYSQL_ROOT_PASSWORD: ${QA_MYSQL_ROOT_PASSWORD:?Set QA_MYSQL_ROOT_PASSWORD}
+      QA_JWT_SECRET_KEY: ${QA_JWT_SECRET_KEY:?Set QA_JWT_SECRET_KEY}
+      QA_ADMIN_PASSWORD: ${QA_ADMIN_PASSWORD:?Set QA_ADMIN_PASSWORD}
+      QA_RBAC_PASSWORD: ${QA_RBAC_PASSWORD:?Set QA_RBAC_PASSWORD}
+      DATABASE_URL: mysql+pymysql://${QA_DATABASE_USER:?Set QA_DATABASE_USER}:${QA_DATABASE_PASSWORD:?Set QA_DATABASE_PASSWORD}@qa-mysql:3306/nexus_qa_test
+    networks: [qa_app]
+
+  qa-mysql:
+    image: mysql:8.4
+    environment:
+      MYSQL_ROOT_PASSWORD: ${QA_MYSQL_ROOT_PASSWORD:?Set QA_MYSQL_ROOT_PASSWORD}
+      MYSQL_DATABASE: nexus_qa_test
+      MYSQL_USER: ${QA_DATABASE_USER:?Set QA_DATABASE_USER}
+      MYSQL_PASSWORD: ${QA_DATABASE_PASSWORD:?Set QA_DATABASE_PASSWORD}
+    volumes:
+      - qa_mysql_data:/var/lib/mysql
+    networks: [qa_data]
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - >-
+          set -eu;
+          client_config=$$(mktemp);
+          trap 'rm -f "$$client_config"' EXIT;
+          (umask 077; printf '[client]\nprotocol=TCP\nhost=127.0.0.1\nuser=%s\npassword=%s\n' "$$MYSQL_USER" "$$MYSQL_PASSWORD" > "$$client_config");
+          selected_database=$$(mysql --defaults-extra-file="$$client_config" --database=nexus_qa_test --batch --skip-column-names --execute='SELECT DATABASE()');
+          [ "$$selected_database" = "nexus_qa_test" ]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+      start_period: 20s
+
+  mailhog:
+    image: mailhog/mailhog:v1.0.1
+    expose: ["1025", "8025"]
+    networks: [qa_app]
+
+  api:
+    <<: *qa-guard
+    build:
+      context: ./apps/api
+      dockerfile: Dockerfile
+    environment:
+      <<: *qa-runtime-environment
+    entrypoint: ["/bin/sh", "/qa/qa-guard.sh", "api"]
+    command: []
+    expose: ["8000"]
+    depends_on:
+      qa-mysql:
+        condition: service_healthy
+      mailhog:
+        condition: service_started
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health/ready')"]
+      interval: 5s
+      timeout: 4s
+      retries: 12
+      start_period: 10s
+    networks: [qa_app, qa_data]
+
+  web:
+    build:
+      context: ./apps/web
+      dockerfile: Dockerfile
+    environment:
+      VITE_API_BASE_URL: /api
+    expose: ["5173"]
+    depends_on:
+      api:
+        condition: service_healthy
+    networks: [qa_app]
+
+  proxy:
+    image: nginx:1.27-alpine
+    volumes:
+      - ./infra/nginx/default.conf:/etc/nginx/conf.d/default.conf:ro
+    expose: ["80"]
+    depends_on:
+      api:
+        condition: service_healthy
+      web:
+        condition: service_started
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://127.0.0.1/"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+      start_period: 5s
+    networks: [qa_app]
+
+  qa-migrate:
+    <<: *qa-guard
+    profiles: [tools]
+    build:
+      context: ./apps/api
+      dockerfile: Dockerfile
+    environment:
+      <<: *qa-runtime-environment
+    entrypoint: ["/bin/sh", "/qa/qa-guard.sh", "migrate"]
+    command: []
+    depends_on:
+      qa-mysql:
+        condition: service_healthy
+    networks: [qa_data]
+
+  qa-bootstrap:
+    <<: *qa-guard
+    profiles: [tools]
+    build:
+      context: ./apps/api
+      dockerfile: Dockerfile
+    environment:
+      <<: *qa-runtime-environment
+      QA_ADMIN_EMAIL: ${QA_ADMIN_EMAIL:?Set QA_ADMIN_EMAIL}
+      QA_ADMIN_NAME: ${QA_ADMIN_NAME:?Set QA_ADMIN_NAME}
+    entrypoint: ["/bin/sh", "/qa/qa-guard.sh", "bootstrap"]
+    command: []
+    depends_on:
+      qa-mysql:
+        condition: service_healthy
+    networks: [qa_data]
+
+  qa-reset-admin:
+    <<: *qa-guard
+    profiles: [tools]
+    build:
+      context: ./apps/api
+      dockerfile: Dockerfile
+    environment:
+      <<: *qa-runtime-environment
+      QA_ADMIN_EMAIL: ${QA_ADMIN_EMAIL:?Set QA_ADMIN_EMAIL}
+    entrypoint: ["/bin/sh", "/qa/qa-guard.sh", "reset_admin"]
+    command: []
+    depends_on:
+      qa-mysql:
+        condition: service_healthy
+    networks: [qa_data]
+
+  qa-migrate-admin-email:
+    <<: *qa-guard
+    profiles: [tools]
+    build:
+      context: ./apps/api
+      dockerfile: Dockerfile
+    environment:
+      <<: *qa-runtime-environment
+      QA_ADMIN_EMAIL: ${QA_ADMIN_EMAIL:?Set QA_ADMIN_EMAIL}
+    entrypoint: ["/bin/sh", "/qa/qa-guard.sh", "migrate_admin_email"]
+    command: []
+    depends_on:
+      qa-mysql:
+        condition: service_healthy
+    networks: [qa_data]
+
+  api-tests:
+    <<: *qa-guard
+    profiles: [test]
+    entrypoint: ["/bin/sh", "/qa/qa-guard.sh", "api_test"]
+    environment:
+      QA_DATABASE_NAME: ${QA_DATABASE_NAME:?Set QA_DATABASE_NAME}
+      QA_DATABASE_HOST: qa-mysql
+      QA_DATABASE_USER: ${QA_DATABASE_USER:?Set QA_DATABASE_USER}
+      QA_DATABASE_PASSWORD: ${QA_DATABASE_PASSWORD:?Set QA_DATABASE_PASSWORD}
+      DATABASE_URL: mysql+pymysql://${QA_DATABASE_USER:?Set QA_DATABASE_USER}:${QA_DATABASE_PASSWORD:?Set QA_DATABASE_PASSWORD}@qa-mysql:3306/nexus_qa_test
+      MYSQL_TEST_DATABASE_URL: mysql+pymysql://${QA_DATABASE_USER:?Set QA_DATABASE_USER}:${QA_DATABASE_PASSWORD:?Set QA_DATABASE_PASSWORD}@qa-mysql:3306/nexus_qa_test
+      MYSQL_TEST_DATABASE_KIND: disposable
+      BASE_URL: http://api:8000
+      DB_HOST: qa-mysql
+      DB_PORT: "3306"
+      DB_USER: ${QA_DATABASE_USER:?Set QA_DATABASE_USER}
+      DB_PASSWORD: ${QA_DATABASE_PASSWORD:?Set QA_DATABASE_PASSWORD}
+      DB_NAME: ${QA_DATABASE_NAME:?Set QA_DATABASE_NAME}
+      QA_ADMIN_EMAIL: ${QA_ADMIN_EMAIL:?Set QA_ADMIN_EMAIL}
+      TEST_USER_EMAIL: ${QA_ADMIN_EMAIL:?Set QA_ADMIN_EMAIL}
+      TEST_USER_PASSWORD: ${QA_ADMIN_PASSWORD:?Set QA_ADMIN_PASSWORD}
+      TEST_RBAC_PASSWORD: ${QA_RBAC_PASSWORD:?Set QA_RBAC_PASSWORD}
+      MAILHOG_API_URL: http://mailhog:8025
+    build:
+      context: ./automation/api
+      dockerfile: Dockerfile
+    depends_on:
+      api:
+        condition: service_healthy
+      mailhog:
+        condition: service_started
+    networks: [qa_app, qa_data]
+    command: []
+
+  ui-tests:
+    <<: *qa-guard
+    profiles: [test]
+    entrypoint: ["/bin/sh", "/qa/qa-guard.sh", "ui_test"]
+    environment:
+      QA_DATABASE_NAME: ${QA_DATABASE_NAME:?Set QA_DATABASE_NAME}
+      QA_DATABASE_HOST: qa-mysql
+      BASE_URL: http://proxy
+      NEXUS_QA_MODE: "true"
+      QA_ADMIN_EMAIL: ${QA_ADMIN_EMAIL:?Set QA_ADMIN_EMAIL}
+      TEST_USER_EMAIL: ${QA_ADMIN_EMAIL:?Set QA_ADMIN_EMAIL}
+      TEST_USER_PASSWORD: ${QA_ADMIN_PASSWORD:?Set QA_ADMIN_PASSWORD}
+    build:
+      context: ./automation/ui
+      dockerfile: Dockerfile
+    depends_on:
+      proxy:
+        condition: service_healthy
+    networks: [qa_app]
+    command: []
+
+  qa-unit-tests:
+    <<: *qa-guard
+    profiles: [test]
+    build:
+      context: ./apps/api
+      dockerfile: Dockerfile.unit-tests
+    entrypoint: ["/bin/sh", "/qa/qa-guard.sh", "qa_unit_test"]
+    command: []
+    environment:
+      APP_ENV: test
+      DATABASE_URL: "sqlite+pysqlite:///:memory:"
+      JWT_SECRET_KEY: 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
+    network_mode: none
+
+volumes:
+  qa_mysql_data:
+
+networks:
+  qa_app:
+    internal: true
+  qa_data:
+    internal: true

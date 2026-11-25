@@ -43,6 +43,10 @@ def login(db: Session, request: Request, email: str, password: str) -> dict[str,
     if user.password_expires_at and user.password_expires_at <= utcnow_naive():
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Temporary password expired")
     user.last_login_at = utcnow_naive()
+    # Acquire the parent-row write lock before the session insert performs its
+    # foreign-key check. Concurrent logins must take these locks in the same
+    # order to avoid an InnoDB shared-to-exclusive lock-upgrade deadlock.
+    db.flush()
     result = _token_pair(user, db, request)
     db.commit()
     return result

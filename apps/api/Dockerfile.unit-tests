@@ -1,0 +1,16 @@
+FROM python:3.12-slim
+
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    APP_ENV=test \
+    DATABASE_URL=sqlite+pysqlite:///:memory:
+WORKDIR /app
+
+COPY requirements-dev.txt ./requirements-dev.txt
+COPY requirements.txt ./requirements.txt
+RUN pip install --no-cache-dir -r requirements-dev.txt
+
+COPY app ./app
+COPY tests/test_reset_qa_admin.py ./tests/test_reset_qa_admin.py
+COPY tests/test_migrate_qa_admin_email.py ./tests/test_migrate_qa_admin_email.py
+COPY tests/test_auth_login.py ./tests/test_auth_login.py

@@ -21,7 +21,7 @@ def login(email: str, password: str) -> str:
         json={"email": email, "password": password},
         timeout=TIMEOUT,
     )
-    assert response.status_code == 200, response.text
+    assert response.status_code == 200, f"Login failed with HTTP {response.status_code}"
     return response.json()["access_token"]
 
 
@@ -124,7 +124,7 @@ def create_role_headers(role_name: str, admin_headers: dict) -> dict:
         timeout=TIMEOUT,
     )
 
-    assert response.status_code == 201, response.text
+    assert response.status_code == 201, f"Role user creation failed with HTTP {response.status_code}"
 
     token = login(email, TEST_RBAC_PASSWORD)
     return {"Authorization": f"Bearer {token}"}

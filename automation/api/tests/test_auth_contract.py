@@ -1,5 +1,7 @@
 
 import os
+import threading
+from concurrent.futures import ThreadPoolExecutor
 
 import httpx
 import pytest
@@ -22,7 +24,7 @@ def login():
         timeout=5,
     )
 
-    assert response.status_code == 200, response.text
+    assert response.status_code == 200, f"Login failed with HTTP {response.status_code}"
 
     tokens = response.json()
     assert tokens["access_token"]
@@ -146,6 +148,67 @@ def test_independent_sessions_survive_other_session_logout():
     assert get_current_user(second_session["access_token"]).status_code == 200
 
     assert logout(second_session["refresh_token"]).status_code == 204
+
+
+def test_concurrent_logins_for_qa_admin_create_independent_sessions():
+    if os.getenv("MYSQL_TEST_DATABASE_KIND") != "disposable":
+        pytest.skip("Concurrent shared-account login regression requires the disposable QA environment")
+
+    assert os.getenv("DB_HOST") == "qa-mysql", "Concurrent login test must target QA MySQL"
+    assert os.getenv("DB_PORT") == "3306", "Concurrent login test must use the QA MySQL port"
+    assert os.getenv("DB_NAME") == "nexus_qa_test", "Concurrent login test must target nexus_qa_test"
+    assert os.getenv("DB_USER") == "nexus_qa_runner", "Concurrent login test must use the QA database user"
+    assert BASE_URL == "http://api:8000", "Concurrent login test must target the QA API service"
+    database_password = os.getenv("DB_PASSWORD", "")
+    if not database_password:
+        pytest.fail("Concurrent login test requires the disposable QA database credentials")
+    expected_database_url = (
+        f"mysql+pymysql://nexus_qa_runner:{database_password}@qa-mysql:3306/nexus_qa_test"
+    )
+    if os.getenv("DATABASE_URL") != expected_database_url:
+        pytest.fail("Concurrent login test requires the QA database URL")
+    if os.getenv("MYSQL_TEST_DATABASE_URL") != expected_database_url:
+        pytest.fail("Concurrent login test requires matching direct and migration database URLs")
+    if not TEST_USER_EMAIL or not TEST_USER_PASSWORD:
+        pytest.skip("Set QA administrator credentials to run the concurrent login test")
+
+    worker_count = 8
+    barrier = threading.Barrier(worker_count)
+
+    def concurrent_login(_worker: int):
+        barrier.wait(timeout=10)
+        return httpx.post(
+            f"{BASE_URL}/v1/auth/login",
+            json={"email": TEST_USER_EMAIL, "password": TEST_USER_PASSWORD},
+            timeout=10,
+        )
+
+    with ThreadPoolExecutor(max_workers=worker_count) as executor:
+        responses = list(executor.map(concurrent_login, range(worker_count)))
+
+    successful_tokens = [response.json() for response in responses if response.status_code == 200]
+    try:
+        statuses = [response.status_code for response in responses]
+        assert statuses == [200] * worker_count, f"Concurrent login HTTP statuses: {statuses}"
+
+        unique_session_count = len({token["refresh_token"] for token in successful_tokens})
+        assert unique_session_count == worker_count, (
+            f"Expected {worker_count} independent refresh sessions, got {unique_session_count}"
+        )
+
+        current_user_statuses = [
+            get_current_user(token["access_token"]).status_code
+            for token in successful_tokens
+        ]
+        assert current_user_statuses == [200] * worker_count, (
+            f"Concurrent login session validation HTTP statuses: {current_user_statuses}"
+        )
+    finally:
+        for token in successful_tokens:
+            try:
+                logout(token["refresh_token"])
+            except httpx.HTTPError:
+                pass
 
 
 def test_refresh_token_reuse_revokes_all_user_sessions():

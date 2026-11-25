@@ -52,7 +52,7 @@ def admin_token():
         timeout=5,
     )
 
-    assert response.status_code == 200, response.text
+    assert response.status_code == 200, f"Admin login failed with HTTP {response.status_code}"
     return response.json()
 
 
@@ -79,7 +79,7 @@ def create_or_login_role_user(admin_token, role_name):
         timeout=5,
     )
 
-    assert create_response.status_code in (201, 409), create_response.text
+    assert create_response.status_code in (201, 409), f"Role user creation failed with HTTP {create_response.status_code}"
 
     login_response = httpx.post(
         f"{BASE_URL}/v1/auth/login",
@@ -87,7 +87,7 @@ def create_or_login_role_user(admin_token, role_name):
         timeout=5,
     )
 
-    assert login_response.status_code == 200, login_response.text
+    assert login_response.status_code == 200, f"Role user login failed with HTTP {login_response.status_code}"
 
     return login_response.json()
 

@@ -1,6 +1,6 @@
-FROM mcr.microsoft.com/playwright:v1.65.0-noble
+FROM mcr.microsoft.com/playwright:v1.65.1-noble
 WORKDIR /tests
 COPY package*.json ./
-RUN npm install
+RUN npm ci
 COPY . .
 CMD ["npx", "playwright", "test"]

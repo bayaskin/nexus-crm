@@ -45,6 +45,78 @@ docker compose --profile test run --rm api-tests
 docker compose --profile test run --rm ui-tests
 ```
 
+## Isolated QA Docker environment
+
+Milestone 5 uses a separate Compose project in `docker-compose.qa.yml`. It has its own `nexus_qa_test` MySQL database and project-scoped volume, private `qa_app` and `qa_data` networks, and no host-published ports. It does not join the development Compose networks or mount the development MySQL volume. QA containers have no Docker socket, privileged mode, or host networking. The QA networks are Docker `internal` networks; this is useful isolation for disposable local testing, not a security boundary for running deliberately malicious code.
+
+The API, migration/bootstrap commands, and test entrypoints run `infra/qa/qa-guard.sh` in a fixed mode passed by the Compose entrypoint, not a guard-mode environment variable. The guard requires the exact QA database name, user and service host, validates secret formatting without printing values, and requires the API/Alembic connection URLs and direct API-test DB settings to match. API tests also require `MYSQL_TEST_DATABASE_KIND=disposable` and `BASE_URL=http://api:8000`. UI tests receive no database credentials or database network access; their guard requires `NEXUS_QA_MODE=true`, the QA target markers, and the fixed `http://proxy` base URL. In QA mode Playwright disables traces, screenshots, video, and the HTML reporter before test execution and suppresses its automatic page DOM snapshot; invalid mode values fail configuration rather than falling back to local artifact capture. Playwright can still create `error-context.md` with matcher-generated assertion details on failure, so do not put secrets in assertion messages or publish that file. Local runs without QA mode retain failure traces and screenshots. The test entrypoints run fixed commands so Compose command/environment overrides cannot silently redirect them. An operator who deliberately overrides a container entrypoint can bypass container guards; do not do so.
+
+Create a private QA environment file and replace every placeholder with independently generated values. The database, root, JWT, administrator, and RBAC-test secrets must each be at least 64 hexadecimal characters and mutually distinct; the guard rejects placeholder, low-diversity, or non-hex values. Keep the actual file private and untracked:
+
+```bash
+cp .env.qa.example .env.qa
+chmod 600 .env.qa
+# Edit .env.qa using a password manager or secure random-value generator.
+```
+
+Use the explicit project, file, and environment file in every command below. The configuration check validates required target markers and secret strength without starting MySQL. `config --quiet` validates Compose interpolation without printing rendered secrets.
+
+```bash
+docker compose --project-name nexus-qa --env-file .env.qa -f docker-compose.qa.yml config --quiet
+docker compose --project-name nexus-qa --env-file .env.qa -f docker-compose.qa.yml --profile tools run --rm qa-config-check
+docker compose --project-name nexus-qa --env-file .env.qa -f docker-compose.qa.yml build api web api-tests ui-tests qa-unit-tests qa-migrate qa-bootstrap qa-reset-admin qa-migrate-admin-email
+docker compose --project-name nexus-qa --env-file .env.qa -f docker-compose.qa.yml up -d qa-mysql mailhog
+docker compose --project-name nexus-qa --env-file .env.qa -f docker-compose.qa.yml --profile tools run --rm qa-migrate
+docker compose --project-name nexus-qa --env-file .env.qa -f docker-compose.qa.yml --profile tools run --rm -it qa-bootstrap
+docker compose --project-name nexus-qa --env-file .env.qa -f docker-compose.qa.yml up -d api web proxy
+```
+
+The bootstrap command reuses `app.commands.bootstrap_admin`; the `qa-bootstrap` service always enters through the fixed `qa-guard.sh bootstrap` entrypoint, which validates the exact QA database target before calling the shared command. It idempotently seeds roles and permissions and prompts for the administrator password without echoing it. Enter the same password configured as `QA_ADMIN_PASSWORD` so the HTTP and UI test fixtures can log in. API and UI tests receive only the credentials they need: API/UI tests use the administrator account; `QA_RBAC_PASSWORD` is a separate password assigned to secondary users created by API tests. The bootstrap service does not receive either password through its environment. Direct operator invocation of `app.commands.bootstrap_admin` outside the guarded QA service is outside this QA isolation guarantee. Migrations and bootstrap run only when explicitly requested.
+
+If the existing QA administrator password needs correction, use the separately guarded maintenance command after the QA database is available. It validates the exact QA database target, reads `QA_ADMIN_EMAIL`, and prompts twice for the replacement password without placing it in arguments or environment variables:
+
+```bash
+docker compose --project-name nexus-qa --env-file .env.qa -f docker-compose.qa.yml --profile tools run --rm -it qa-reset-admin
+```
+
+The command updates only that existing superuser, clears the temporary-password change/expiry fields, and revokes its active sessions in one transaction. It does not create accounts or seed roles, and it does not run migrations or bootstrap.
+
+If the QA administrator address is still `qa-admin@example.test`, update only `QA_ADMIN_EMAIL` in the ignored `.env.qa` to `qa-admin@example.com` before migrating the existing account. The address uses the reserved `example.com` domain and is accepted by the application's normal `EmailStr` validation; production email validation is unchanged. Bootstrap and both API/UI test services consume this same configured value. After confirming the old value in the disposable QA account, run this guarded one-time migration. It requires the exact old and new values, checks that the old account is a superuser, rejects a conflicting target, and is safe to repeat after success. It changes only the email column and preserves account ID, password hash, roles, and permissions.
+
+```bash
+docker compose --project-name nexus-qa --env-file .env.qa -f docker-compose.qa.yml --profile tools run --rm qa-migrate-admin-email --old-email qa-admin@example.test --new-email qa-admin@example.com
+```
+
+The guard requires the new argument to match `QA_ADMIN_EMAIL`, `APP_ENV=test`, and the exact `qa-mysql:3306/nexus_qa_test` URL with the restricted `nexus_qa_runner` account. Do not change the command's project, Compose file, database target, or arguments. This command is not run automatically.
+
+Run test suites on demand after initialization:
+
+```bash
+docker compose --project-name nexus-qa --env-file .env.qa -f docker-compose.qa.yml --profile test run --rm api-tests
+docker compose --project-name nexus-qa --env-file .env.qa -f docker-compose.qa.yml --profile test run --rm ui-tests
+```
+
+Backend unit tests use a separate image built from `apps/api/requirements-dev.txt`; pytest is installed at image-build time, never at container runtime. The `qa-unit-tests` service has no network (`network_mode: none`), receives only an in-memory SQLite URL and a test signing key, and its guard rejects MySQL URLs or host settings. Its fixed command runs the guarded maintenance-command tests and the authentication SQL lock-order regression with pytest and no cache provider. Build and run them explicitly:
+
+```bash
+docker compose --project-name nexus-qa --env-file .env.qa -f docker-compose.qa.yml build qa-unit-tests
+docker compose --project-name nexus-qa --env-file .env.qa -f docker-compose.qa.yml --profile test run --rm qa-unit-tests
+```
+
+Stop the QA services without deleting test data:
+
+```bash
+docker compose --project-name nexus-qa --env-file .env.qa -f docker-compose.qa.yml down --remove-orphans
+```
+
+To remove only the disposable QA project's volume after confirming you no longer need its data, run this destructive command:
+
+```bash
+docker compose --project-name nexus-qa --env-file .env.qa -f docker-compose.qa.yml down --volumes --remove-orphans
+```
+
+Do not remove the `--project-name nexus-qa` or `-f docker-compose.qa.yml` arguments from cleanup commands. The QA project contains its own explicitly named volume and does not refer to `mysql_data`.
+
 ## Useful commands
 
 ```bash

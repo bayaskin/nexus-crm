@@ -1,4 +1,5 @@
 import { test as base, expect } from "./auth";
+import { createCustomerEmail } from "./customer-email.mjs";
 
 type CustomerFixtures = {
   customerProfile: {
@@ -20,7 +21,7 @@ export const test = base.extend<CustomerFixtures>({
 
     await dialog.getByLabel(/Customer name/).fill(customerName);
     await dialog.getByLabel("Email").fill(
-      `playwright-${Date.now()}@example.com`,
+      createCustomerEmail(testInfo.workerIndex),
     );
 
     await dialog.getByRole("button", { name: "Create customer" }).click();
