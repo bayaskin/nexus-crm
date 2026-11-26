@@ -3,7 +3,9 @@
 This module describes approved suites; it does not launch containers or run
 tests. Selectors and service identifiers are version-controlled data. They
 must never be populated from GitHub content, a test plan, or environment
-overrides. Phase 3 must add a fixed launcher and an atomic concurrency claim.
+overrides. Phase 3B.1 supplies an atomic claim and a stable selector ID; a
+future fixed launcher must still resolve these trusted values without accepting
+commands or runtime configuration from callers.
 """
 
 from __future__ import annotations
@@ -16,11 +18,7 @@ from typing import Annotated, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator, model_validator
 
-
-class SuiteRunner(StrEnum):
-    BACKEND_UNIT = "qa-unit-tests"
-    API = "api-tests"
-    UI = "ui-tests"
+from app.schemas.qa_execution import RunnerServiceId as SuiteRunner
 
 
 class ExecutionReasonCode(StrEnum):
@@ -51,6 +49,7 @@ class SuiteDefinition(_StrictFrozenModel):
     suite_id: _SuiteId
     description: str = Field(min_length=1, max_length=300)
     runner_service: SuiteRunner
+    selector_id: Annotated[str, Field(pattern=r"^[a-z][a-z0-9-]{1,63}$", max_length=64)]
     selectors: tuple[_Selector, ...] = Field(min_length=1, max_length=32)
     timeout_limit_seconds: int = Field(ge=1, le=3600)
     enabled: bool
@@ -166,6 +165,7 @@ TRUSTED_SUITE_DEFINITIONS: tuple[SuiteDefinition, ...] = (
         suite_id="unit-backend",
         description="Guarded backend unit tests using the network-disabled, in-memory SQLite runner.",
         runner_service=SuiteRunner.BACKEND_UNIT,
+        selector_id="backend-unit-maintained-v1",
         selectors=(
             "tests/test_reset_qa_admin.py",
             "tests/test_migrate_qa_admin_email.py",
@@ -186,6 +186,7 @@ TRUSTED_SUITE_DEFINITIONS: tuple[SuiteDefinition, ...] = (
         suite_id="api-auth",
         description="API authentication contract tests against the isolated QA API and database.",
         runner_service=SuiteRunner.API,
+        selector_id="api-auth-contract-v1",
         selectors=("tests/test_auth_contract.py",),
         timeout_limit_seconds=600,
         enabled=True,
@@ -194,6 +195,7 @@ TRUSTED_SUITE_DEFINITIONS: tuple[SuiteDefinition, ...] = (
         suite_id="api-regression",
         description="CRM API regression tests against the isolated QA API and database.",
         runner_service=SuiteRunner.API,
+        selector_id="api-regression-maintained-v1",
         selectors=(
             "tests/test_customers.py",
             "tests/test_health.py",
@@ -211,6 +213,7 @@ TRUSTED_SUITE_DEFINITIONS: tuple[SuiteDefinition, ...] = (
         suite_id="ui-regression",
         description="Playwright UI regression tests through the isolated QA proxy.",
         runner_service=SuiteRunner.UI,
+        selector_id="ui-regression-maintained-v1",
         selectors=(
             "tests/customer-contacts.spec.ts",
             "tests/customer-lifecycle.spec.ts",

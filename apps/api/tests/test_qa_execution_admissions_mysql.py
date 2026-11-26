@@ -35,7 +35,11 @@ from app.schemas.qa import (
 )
 from app.schemas.test_plan import bind_test_plan, build_test_planning_input
 from app.services.change_impact import ChangeImpactAnalyzer
-from app.services.qa_admissions import QAAdmissionService
+from app.services.qa_admissions import (
+    ExecutionClaimRejected,
+    InternalExecutionCaller,
+    QAAdmissionService,
+)
 from app.services.qa_providers import MockTestPlanningProvider
 
 
@@ -307,7 +311,17 @@ def test_mysql_admission_capacity_is_atomic_under_eight_concurrent_requests(isol
 
     winner_id = winners[0][0]
     with SessionLocal() as db:
-        assert service.finish(db, winner_id, QAExecutionAdmissionState.COMPLETED)
+        winner_contract = service.claim_execution(
+            db, winner_id, InternalExecutionCaller.QA_EXECUTION_COORDINATOR
+        )
+    with SessionLocal() as db:
+        assert service.finish(
+            db,
+            winner_id,
+            QAExecutionAdmissionState.COMPLETED,
+            execution_attempt_id=winner_contract.execution_attempt_id,
+            caller=InternalExecutionCaller.QA_EXECUTION_COORDINATOR,
+        )
 
     with SessionLocal() as db:
         assert db.get(QAExecutionCapacity, 1).active_count == 0
@@ -322,11 +336,82 @@ def test_mysql_admission_capacity_is_atomic_under_eight_concurrent_requests(isol
         )
         assert retry.state == "reserved"
         assert retry.reason_code is None
-        assert service.finish(db, retry.id, QAExecutionAdmissionState.COMPLETED)
+        retry_contract = service.claim_execution(
+            db, retry.id, InternalExecutionCaller.QA_EXECUTION_COORDINATOR
+        )
+        assert service.finish(
+            db,
+            retry.id,
+            QAExecutionAdmissionState.COMPLETED,
+            execution_attempt_id=retry_contract.execution_attempt_id,
+            caller=InternalExecutionCaller.QA_EXECUTION_COORDINATOR,
+        )
 
     with SessionLocal() as db:
         capacity = db.get(QAExecutionCapacity, 1)
         assert capacity is not None and capacity.active_count == 0
+
+
+def test_mysql_claim_is_atomic_for_eight_workers(isolated_admission_records):
+    owned: _OwnedRecords = isolated_admission_records
+    actor, revision, run = _make_run(0)
+    owned.user_ids.append(actor.id)
+    owned.revision_ids.append(revision.id)
+    owned.run_ids.append(run.id)
+    with SessionLocal.begin() as db:
+        db.add(actor)
+        db.add(revision)
+        db.add(run)
+
+    service = QAAdmissionService()
+    with SessionLocal() as db:
+        admission = service.admit(
+            db,
+            actor,
+            run.id,
+            CreateQAExecutionAdmissionRequest(suite_id="api-auth"),
+        )
+    assert admission.state == "reserved"
+
+    barrier = threading.Barrier(8)
+
+    def claim() -> tuple[str, UUID | None, str | None]:
+        with SessionLocal() as db:
+            barrier.wait(timeout=30)
+            try:
+                contract = service.claim_execution(
+                    db,
+                    admission.id,
+                    InternalExecutionCaller.QA_EXECUTION_COORDINATOR,
+                )
+                return "claimed", contract.execution_attempt_id, None
+            except ExecutionClaimRejected as error:
+                return "rejected", None, error.reason_code
+
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        futures = [pool.submit(claim) for _ in range(8)]
+        results = [future.result(timeout=90) for future in futures]
+
+    successes = [result for result in results if result[0] == "claimed"]
+    rejections = [result for result in results if result[0] == "rejected"]
+    assert len(successes) == 1
+    assert len(rejections) == 7
+    assert all(reason == "claim_already_owned" for _status, _attempt_id, reason in rejections)
+    assert successes[0][1] is not None
+
+    with SessionLocal() as db:
+        stored = db.get(QAExecutionAdmission, admission.id)
+        capacity = db.get(QAExecutionCapacity, 1)
+        active = db.scalars(
+            select(QAExecutionAdmission).where(
+                QAExecutionAdmission.state.in_(["reserved", "running"])
+            )
+        ).all()
+        assert stored is not None and stored.state == "running"
+        assert stored.execution_attempt_id == successes[0][1]
+        assert stored.worker_id == InternalExecutionCaller.QA_EXECUTION_COORDINATOR.value
+        assert capacity is not None and capacity.active_count == 1
+        assert len(active) == 1
 
 
 def test_mysql_same_run_suite_is_idempotent_after_authentication_snapshot(isolated_admission_records):

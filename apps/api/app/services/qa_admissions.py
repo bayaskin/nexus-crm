@@ -4,11 +4,12 @@ from __future__ import annotations
 
 from collections.abc import Callable, Mapping
 from datetime import datetime, timedelta
+from enum import StrEnum
 from typing import Any
-from uuid import UUID
+from uuid import UUID, uuid4
 
 from pydantic import ValidationError
-from sqlalchemy import select, update
+from sqlalchemy import or_, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.engine import make_url
 from sqlalchemy.orm import Session
@@ -29,6 +30,7 @@ from app.schemas.qa import (
 )
 from app.schemas.change_impact import ChangeImpactAnalysis
 from app.schemas.github import GitHubPRContext
+from app.schemas.qa_execution import TrustedRunnerContract
 from app.schemas.test_plan import ProposedTestCase, TestPlan, TestPlanProposal, bind_test_plan
 from app.services.change_impact import ChangeImpactAnalyzer
 from app.services.permissions import has_permission
@@ -53,6 +55,20 @@ class AdmissionRunNotFound(LookupError):
 
 class CapacityConsistencyError(RuntimeError):
     pass
+
+
+class ExecutionClaimRejected(RuntimeError):
+    """Internal claim failure with a safe, stable reason code."""
+
+    def __init__(self, reason_code: str) -> None:
+        self.reason_code = reason_code
+        super().__init__(reason_code)
+
+
+class InternalExecutionCaller(StrEnum):
+    """In-process claim authority; no HTTP route accepts this identity."""
+
+    QA_EXECUTION_COORDINATOR = "qa-execution-coordinator"
 
 
 def trusted_qa_execution_environment(
@@ -347,42 +363,181 @@ class QAAdmissionService:
             db.rollback()
             raise
 
-    def mark_running(self, db: Session, admission_id: UUID) -> bool:
-        """Phase 3B hook: running work stays counted until an explicit terminal update."""
+    def claim_execution(
+        self,
+        db: Session,
+        admission_id: UUID,
+        caller: InternalExecutionCaller,
+    ) -> TrustedRunnerContract:
+        """Atomically claim a live reservation for trusted in-process execution.
+
+        This method is deliberately absent from API routes. The supplied caller
+        must be an internal enum identity; knowing an admission UUID alone does
+        not authorize a claim. No process is launched here.
+        """
+
+        if caller is not InternalExecutionCaller.QA_EXECUTION_COORDINATOR:
+            db.rollback()
+            raise ExecutionClaimRejected("unauthorized_internal_caller")
 
         try:
+            # Every admission lifecycle mutation locks capacity before the
+            # admission row, preserving Phase 3A's global lock order.
             db.execute(
                 update(QAExecutionCapacity)
                 .where(QAExecutionCapacity.id == 1)
                 .values(active_count=QAExecutionCapacity.active_count)
             )
-            if db.get(QAExecutionCapacity, 1) is None:
-                db.rollback()
-                return False
+            capacity = db.scalar(
+                select(QAExecutionCapacity)
+                .where(QAExecutionCapacity.id == 1)
+                .with_for_update()
+                .execution_options(populate_existing=True)
+            )
+            if capacity is None:
+                raise ExecutionClaimRejected("policy_config_invalid")
+
+            admission = db.scalar(
+                select(QAExecutionAdmission)
+                .where(QAExecutionAdmission.id == admission_id)
+                .with_for_update()
+            )
+            if admission is None:
+                raise ExecutionClaimRejected("admission_not_found")
+            if admission.state != QAExecutionAdmissionState.RESERVED.value:
+                reason = (
+                    "claim_already_owned"
+                    if admission.state == QAExecutionAdmissionState.RUNNING.value
+                    else "admission_terminal"
+                )
+                raise ExecutionClaimRejected(reason)
+
             now = self.clock()
-            result = db.execute(
+            if admission.reserved_until is None or admission.reserved_until <= now:
+                expired = db.execute(
+                    update(QAExecutionAdmission)
+                    .where(
+                        QAExecutionAdmission.id == admission_id,
+                        QAExecutionAdmission.state == QAExecutionAdmissionState.RESERVED.value,
+                        or_(
+                            QAExecutionAdmission.reserved_until.is_(None),
+                            QAExecutionAdmission.reserved_until <= now,
+                        ),
+                    )
+                    .values(
+                        state=QAExecutionAdmissionState.EXPIRED.value,
+                        reason_code="reservation_expired",
+                        completed_at=now,
+                    )
+                )
+                if expired.rowcount != 1:
+                    raise ExecutionClaimRejected("claim_raced")
+                self._decrement_capacity(db, 1)
+                db.commit()
+                raise ExecutionClaimRejected("reservation_expired")
+
+            if capacity.active_count < 1:
+                raise CapacityConsistencyError("Reserved admission is missing its capacity slot")
+
+            run = db.get(QARun, admission.qa_run_id)
+            evidence = self._load_validated_plan(db, run) if run is not None else None
+            if evidence is None:
+                raise ExecutionClaimRejected("evidence_invalid")
+            context, impact, plan = evidence
+            try:
+                suggested_suite_ids = map_plan_evidence_to_suite_ids(context, impact, plan)
+            except (AttributeError, TypeError, ValueError, ValidationError):
+                raise ExecutionClaimRejected("evidence_invalid") from None
+            if admission.suite_id not in suggested_suite_ids:
+                raise ExecutionClaimRejected("evidence_invalid")
+
+            definition = self.registry.get(admission.suite_id)
+            if definition is None:
+                raise ExecutionClaimRejected("unknown_suite")
+            if not definition.enabled:
+                raise ExecutionClaimRejected("suite_disabled")
+            environment = self.environment_factory(definition.runner_service)
+            if environment is None:
+                raise ExecutionClaimRejected("unsafe_environment")
+            if admission.timeout_seconds is None:
+                raise ExecutionClaimRejected("policy_config_invalid")
+
+            try:
+                policy_config = ExecutionPolicyConfig(
+                    max_concurrent_executions=capacity.max_concurrent_executions
+                )
+            except ValidationError:
+                raise ExecutionClaimRejected("policy_config_invalid") from None
+            # The claimed admission already owns one slot. Subtract only that
+            # reservation when reevaluating the policy; do not modify capacity.
+            decision = evaluate_execution_policy(
+                {
+                    "suite_ids": [admission.suite_id],
+                    "requested_timeout_seconds": admission.timeout_seconds,
+                },
+                environment,
+                active_execution_count=capacity.active_count - 1,
+                registry=self.registry,
+                config=policy_config,
+            )
+            if not decision.allowed:
+                raise ExecutionClaimRejected(decision.reason_code.value)
+            if decision.runner_service != definition.runner_service:
+                raise ExecutionClaimRejected("registry_invalid")
+
+            attempt_id = uuid4()
+            contract_values = {
+                "admission_id": admission.id,
+                "qa_run_id": admission.qa_run_id,
+                "suite_id": definition.suite_id,
+                "runner_service": definition.runner_service,
+                "selector_id": definition.selector_id,
+                "effective_timeout_seconds": decision.timeout_seconds,
+                "environment_identity": environment.compose_project,
+                "execution_attempt_id": attempt_id,
+            }
+            claimed = db.execute(
                 update(QAExecutionAdmission)
                 .where(
                     QAExecutionAdmission.id == admission_id,
                     QAExecutionAdmission.state == QAExecutionAdmissionState.RESERVED.value,
                     QAExecutionAdmission.reserved_until > now,
+                    QAExecutionAdmission.execution_attempt_id.is_(None),
+                    QAExecutionAdmission.worker_id.is_(None),
                 )
-                .values(state=QAExecutionAdmissionState.RUNNING.value, started_at=now)
+                .values(
+                    state=QAExecutionAdmissionState.RUNNING.value,
+                    execution_attempt_id=attempt_id,
+                    worker_id=caller.value,
+                    started_at=now,
+                )
             )
+            if claimed.rowcount != 1:
+                raise ExecutionClaimRejected("claim_raced")
+
+            contract = TrustedRunnerContract.model_validate(contract_values)
             db.commit()
-            return result.rowcount == 1
+            # The contract is not returned until its claim transaction commits.
+            return contract
         except Exception:
             db.rollback()
             raise
 
-    def finish(self, db: Session, admission_id: UUID, state: QAExecutionAdmissionState) -> bool:
-        """Release capacity exactly once after a confirmed terminal runner state."""
+    def finish(
+        self,
+        db: Session,
+        admission_id: UUID,
+        state: QAExecutionAdmissionState,
+        *,
+        execution_attempt_id: UUID,
+        caller: InternalExecutionCaller,
+    ) -> bool:
+        """Fence terminal updates to the internal owner and exact execution attempt."""
 
-        if state not in {
-            QAExecutionAdmissionState.COMPLETED,
-            QAExecutionAdmissionState.FAILED,
-            QAExecutionAdmissionState.CANCELLED,
-        }:
+        if caller is not InternalExecutionCaller.QA_EXECUTION_COORDINATOR:
+            db.rollback()
+            raise ExecutionClaimRejected("unauthorized_internal_caller")
+        if state not in {QAExecutionAdmissionState.COMPLETED, QAExecutionAdmissionState.FAILED}:
             raise ValueError("Admission terminal state is invalid")
         try:
             db.execute(
@@ -395,14 +550,21 @@ class QAAdmissionService:
                 .where(QAExecutionAdmission.id == admission_id)
                 .with_for_update()
             )
-            if admission is None or admission.state not in ACTIVE_ADMISSION_STATES:
+            if (
+                admission is None
+                or admission.state != QAExecutionAdmissionState.RUNNING.value
+                or admission.execution_attempt_id != execution_attempt_id
+                or admission.worker_id != caller.value
+            ):
                 db.rollback()
                 return False
             result = db.execute(
                 update(QAExecutionAdmission)
                 .where(
                     QAExecutionAdmission.id == admission_id,
-                    QAExecutionAdmission.state.in_(ACTIVE_ADMISSION_STATES),
+                    QAExecutionAdmission.state == QAExecutionAdmissionState.RUNNING.value,
+                    QAExecutionAdmission.execution_attempt_id == execution_attempt_id,
+                    QAExecutionAdmission.worker_id == caller.value,
                 )
                 .values(state=state.value, completed_at=self.clock())
             )

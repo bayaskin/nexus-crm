@@ -69,6 +69,10 @@ def test_trusted_registry_contains_expected_stable_suites_and_fixed_selectors():
         "tests/test_config.py",
     )
     assert not hasattr(decision, "command")
+    assert DEFAULT_SUITE_REGISTRY.get("unit-backend").selector_id == "backend-unit-maintained-v1"
+    assert DEFAULT_SUITE_REGISTRY.get("api-auth").selector_id == "api-auth-contract-v1"
+    assert DEFAULT_SUITE_REGISTRY.get("api-regression").selector_id == "api-regression-maintained-v1"
+    assert DEFAULT_SUITE_REGISTRY.get("ui-regression").selector_id == "ui-regression-maintained-v1"
 
 
 @pytest.mark.parametrize(
@@ -109,6 +113,7 @@ def test_disabled_suite_is_denied():
             suite_id="disabled-api",
             description="Disabled regression suite.",
             runner_service=SuiteRunner.API,
+            selector_id="disabled-api-test-v1",
             selectors=("tests/test_auth_contract.py",),
             timeout_limit_seconds=60,
             enabled=False,

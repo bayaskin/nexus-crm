@@ -35,6 +35,11 @@ class QAExecutionAdmission(UUIDPrimaryKey, Base):
             "state in ('reserved', 'running', 'completed', 'failed', 'cancelled', 'expired', 'denied')",
             name="ck_qa_execution_admissions_state",
         ),
+        CheckConstraint(
+            "(execution_attempt_id is null and worker_id is null) or "
+            "(execution_attempt_id is not null and worker_id is not null and started_at is not null)",
+            name="ck_qa_execution_admissions_attempt_identity",
+        ),
         Index("ix_qa_execution_admissions_state_expiry", "state", "reserved_until"),
         Index("ix_qa_execution_admissions_run_created", "qa_run_id", "created_at"),
         Index("ix_qa_execution_admissions_run_suite_state", "qa_run_id", "suite_id", "state"),
@@ -45,6 +50,7 @@ class QAExecutionAdmission(UUIDPrimaryKey, Base):
             "active_slot",
             unique=True,
         ),
+        Index("uq_qa_execution_admissions_attempt_id", "execution_attempt_id", unique=True),
     )
 
     suite_id: Mapped[str] = mapped_column(String(64), nullable=False)
@@ -62,11 +68,16 @@ class QAExecutionAdmission(UUIDPrimaryKey, Base):
         Computed("CASE WHEN state IN ('reserved', 'running') THEN 1 ELSE NULL END", persisted=True),
         nullable=True,
     )
+    execution_attempt_id: Mapped[UUID | None] = mapped_column(
+        Uuid(as_uuid=True, native_uuid=False), nullable=True
+    )
+    worker_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
     reason_code: Mapped[str | None] = mapped_column(String(64))
     timeout_seconds: Mapped[int | None] = mapped_column(Integer)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=False), nullable=False, server_default=func.now()
     )
     reserved_until: Mapped[datetime | None] = mapped_column(DateTime(timezone=False))
+    # Claim timestamp for the single persisted execution attempt.
     started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=False))
     completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=False))

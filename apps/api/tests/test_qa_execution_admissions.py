@@ -41,9 +41,16 @@ from app.schemas.qa import (
     QATriggerType,
 )
 from app.schemas.test_plan import TestPlan, bind_test_plan, build_test_planning_input
+from app.schemas.qa_execution import TrustedRunnerContract
 from app.services.change_impact import ChangeImpactAnalyzer
 from app.services.permissions import has_permission
-from app.services.qa_admissions import QAAdmissionService, map_plan_evidence_to_suite_ids, trusted_qa_execution_environment
+from app.services.qa_admissions import (
+    ExecutionClaimRejected,
+    InternalExecutionCaller,
+    QAAdmissionService,
+    map_plan_evidence_to_suite_ids,
+    trusted_qa_execution_environment,
+)
 from app.services.qa_providers import MockTestPlanningProvider
 from app.services.qa_suite_registry import (
     DEFAULT_SUITE_REGISTRY,
@@ -362,6 +369,7 @@ def test_unauthorized_unknown_and_disabled_requests_are_denied_without_consuming
             suite_id="unit-backend",
             description="Disabled test suite.",
             runner_service=SuiteRunner.BACKEND_UNIT,
+            selector_id="backend-unit-test-v1",
             selectors=("tests/test_auth_login.py",),
             timeout_limit_seconds=300,
             enabled=False,
@@ -592,7 +600,10 @@ def test_expired_reservation_recovery_releases_capacity_but_running_work_is_reta
     db = factory()
     try:
         running = service.admit(db, actor, run.id, _request())
-        assert service.mark_running(db, running.id) is True
+        contract = service.claim_execution(
+            db, running.id, InternalExecutionCaller.QA_EXECUTION_COORDINATOR
+        )
+        assert contract.admission_id == running.id
     finally:
         db.close()
     clock_value[0] += timedelta(days=1)
@@ -613,9 +624,255 @@ def test_finish_releases_capacity_once_and_expired_reservation_cannot_start(admi
     db = factory()
     try:
         admission = service.admit(db, actor, run.id, _request())
-        assert service.finish(db, admission.id, state=QAExecutionAdmissionState.COMPLETED)
-        assert not service.finish(db, admission.id, state=QAExecutionAdmissionState.COMPLETED)
+        assert not service.finish(
+            db,
+            admission.id,
+            state=QAExecutionAdmissionState.COMPLETED,
+            execution_attempt_id=uuid4(),
+            caller=InternalExecutionCaller.QA_EXECUTION_COORDINATOR,
+        )
+        contract = service.claim_execution(
+            db, admission.id, InternalExecutionCaller.QA_EXECUTION_COORDINATOR
+        )
+        assert contract.execution_attempt_id is not None
+        with pytest.raises(ExecutionClaimRejected, match="claim_already_owned"):
+            service.claim_execution(db, admission.id, InternalExecutionCaller.QA_EXECUTION_COORDINATOR)
+        assert not service.finish(
+            db,
+            admission.id,
+            state=QAExecutionAdmissionState.COMPLETED,
+            execution_attempt_id=uuid4(),
+            caller=InternalExecutionCaller.QA_EXECUTION_COORDINATOR,
+        )
+        assert service.finish(
+            db,
+            admission.id,
+            state=QAExecutionAdmissionState.COMPLETED,
+            execution_attempt_id=contract.execution_attempt_id,
+            caller=InternalExecutionCaller.QA_EXECUTION_COORDINATOR,
+        )
+        assert not service.finish(
+            db,
+            admission.id,
+            state=QAExecutionAdmissionState.COMPLETED,
+            execution_attempt_id=contract.execution_attempt_id,
+            caller=InternalExecutionCaller.QA_EXECUTION_COORDINATOR,
+        )
     finally:
         db.close()
     with factory() as db:
         assert db.get(QAExecutionCapacity, 1).active_count == 0
+
+
+def test_running_admission_can_fail_and_release_capacity_once(admission_db):
+    _engine, factory = admission_db
+    actor, run, _plan = _seed_run(factory)
+    service = _service()
+    with factory() as db:
+        admission = service.admit(db, actor, run.id, _request())
+        admission_id = admission.id
+        contract = service.claim_execution(
+            db, admission_id, InternalExecutionCaller.QA_EXECUTION_COORDINATOR
+        )
+        execution_attempt_id = contract.execution_attempt_id
+        assert execution_attempt_id is not None
+        assert not service.finish(
+            db,
+            admission_id,
+            QAExecutionAdmissionState.FAILED,
+            execution_attempt_id=uuid4(),
+            caller=InternalExecutionCaller.QA_EXECUTION_COORDINATOR,
+        )
+        assert service.finish(
+            db,
+            admission_id,
+            QAExecutionAdmissionState.FAILED,
+            execution_attempt_id=execution_attempt_id,
+            caller=InternalExecutionCaller.QA_EXECUTION_COORDINATOR,
+        )
+        assert not service.finish(
+            db,
+            admission_id,
+            QAExecutionAdmissionState.FAILED,
+            execution_attempt_id=execution_attempt_id,
+            caller=InternalExecutionCaller.QA_EXECUTION_COORDINATOR,
+        )
+    with factory() as db:
+        stored = db.get(QAExecutionAdmission, admission_id)
+        assert stored is not None
+        assert stored.state == QAExecutionAdmissionState.FAILED.value
+        assert stored.execution_attempt_id == execution_attempt_id
+        assert stored.worker_id == InternalExecutionCaller.QA_EXECUTION_COORDINATOR.value
+        assert db.get(QAExecutionCapacity, 1).active_count == 0
+
+
+def test_claim_requires_internal_caller_and_known_reserved_admission(admission_db):
+    _engine, factory = admission_db
+    actor, run, _plan = _seed_run(factory)
+    service = _service()
+    with factory() as db:
+        with pytest.raises(ExecutionClaimRejected, match="unauthorized_internal_caller"):
+            service.claim_execution(db, uuid4(), "qa-execution-coordinator")
+        with pytest.raises(ExecutionClaimRejected, match="admission_not_found"):
+            service.claim_execution(
+                db, uuid4(), InternalExecutionCaller.QA_EXECUTION_COORDINATOR
+            )
+    with factory() as db:
+        admission = service.admit(db, actor, run.id, _request())
+        assert admission.state == "reserved"
+        contract = service.claim_execution(db, admission.id, InternalExecutionCaller.QA_EXECUTION_COORDINATOR)
+        assert service.finish(
+            db,
+            admission.id,
+            QAExecutionAdmissionState.COMPLETED,
+            execution_attempt_id=contract.execution_attempt_id,
+            caller=InternalExecutionCaller.QA_EXECUTION_COORDINATOR,
+        )
+        with pytest.raises(ExecutionClaimRejected, match="admission_terminal"):
+            service.claim_execution(db, admission.id, InternalExecutionCaller.QA_EXECUTION_COORDINATOR)
+
+
+def test_claim_persists_trusted_contract_and_does_not_increment_capacity(admission_db):
+    _engine, factory = admission_db
+    actor, run, _plan = _seed_run(factory)
+    service = _service()
+    with factory() as db:
+        admission = service.admit(db, actor, run.id, _request("api-auth", requested_timeout_seconds=120))
+        before = db.get(QAExecutionCapacity, 1).active_count
+        contract = service.claim_execution(
+            db, admission.id, InternalExecutionCaller.QA_EXECUTION_COORDINATOR
+        )
+        assert contract.admission_id == admission.id
+        assert contract.qa_run_id == run.id
+        assert contract.suite_id == "api-auth"
+        assert contract.runner_service.value == "api-tests"
+        assert contract.selector_id == "api-auth-contract-v1"
+        assert contract.effective_timeout_seconds == 120
+        assert contract.environment_identity == "nexus-qa"
+        assert "command" not in contract.model_dump()
+        assert "selectors" not in contract.model_dump()
+        with pytest.raises(ValidationError):
+            TrustedRunnerContract.model_validate(
+                {**contract.model_dump(mode="python"), "command": "pytest tests/evil.py"}
+            )
+        claimed = db.get(QAExecutionAdmission, admission.id)
+        assert claimed.state == "running"
+        assert claimed.execution_attempt_id == contract.execution_attempt_id
+        assert claimed.worker_id == InternalExecutionCaller.QA_EXECUTION_COORDINATOR.value
+        assert claimed.started_at is not None
+        assert db.get(QAExecutionCapacity, 1).active_count == before == 1
+
+
+def test_expired_claim_transitions_and_releases_capacity_once(admission_db):
+    _engine, factory = admission_db
+    actor, run, _plan = _seed_run(factory)
+    now = datetime(2026, 11, 25, 12, 0, 0)
+    clock_value = [now]
+    service = _service(clock=lambda: clock_value[0])
+    with factory() as db:
+        admission = service.admit(db, actor, run.id, _request())
+    clock_value[0] += timedelta(minutes=5, seconds=1)
+    with factory() as db:
+        with pytest.raises(ExecutionClaimRejected, match="reservation_expired"):
+            service.claim_execution(
+                db, admission.id, InternalExecutionCaller.QA_EXECUTION_COORDINATOR
+            )
+    with factory() as db:
+        expired = db.get(QAExecutionAdmission, admission.id)
+        assert expired.state == "expired"
+        assert expired.execution_attempt_id is None
+        assert expired.worker_id is None
+        assert db.get(QAExecutionCapacity, 1).active_count == 0
+
+
+def test_claim_rejects_suite_disabled_after_reservation(admission_db):
+    _engine, factory = admission_db
+    actor, run, _plan = _seed_run(factory)
+    normal = _service()
+    with factory() as db:
+        admission = normal.admit(db, actor, run.id, _request("api-auth"))
+    disabled = SuiteRegistry([
+        DEFAULT_SUITE_REGISTRY.get("api-auth").model_copy(update={"enabled": False})
+    ])
+    with factory() as db:
+        with pytest.raises(ExecutionClaimRejected, match="suite_disabled"):
+            _service(registry=disabled).claim_execution(
+                db, admission.id, InternalExecutionCaller.QA_EXECUTION_COORDINATOR
+            )
+        assert db.get(QAExecutionCapacity, 1).active_count == 1
+
+
+def test_claim_rejects_unsafe_environment_after_reservation(admission_db):
+    _engine, factory = admission_db
+    actor, run, _plan = _seed_run(factory)
+    with factory() as db:
+        admission = _service().admit(db, actor, run.id, _request("api-auth"))
+    with factory() as db:
+        with pytest.raises(ExecutionClaimRejected, match="unsafe_environment"):
+            QAAdmissionService(environment_factory=lambda _runner: None).claim_execution(
+                db, admission.id, InternalExecutionCaller.QA_EXECUTION_COORDINATOR
+            )
+        assert db.get(QAExecutionCapacity, 1).active_count == 1
+
+
+def test_claim_rejects_timeout_that_no_longer_meets_policy(admission_db):
+    _engine, factory = admission_db
+    actor, run, _plan = _seed_run(factory)
+    normal = _service()
+    with factory() as db:
+        admission = normal.admit(db, actor, run.id, _request("api-auth", requested_timeout_seconds=600))
+    short_api_suite = DEFAULT_SUITE_REGISTRY.get("api-auth").model_copy(
+        update={"timeout_limit_seconds": 300}
+    )
+    shortened_registry = SuiteRegistry([short_api_suite])
+    with factory() as db:
+        with pytest.raises(ExecutionClaimRejected, match="timeout_exceeded"):
+            _service(registry=shortened_registry).claim_execution(
+                db, admission.id, InternalExecutionCaller.QA_EXECUTION_COORDINATOR
+            )
+        assert db.get(QAExecutionCapacity, 1).active_count == 1
+
+
+def test_claim_rejects_invalidated_stored_evidence(admission_db):
+    _engine, factory = admission_db
+    actor, run, _plan = _seed_run(factory)
+    service = _service()
+    with factory() as db:
+        admission = service.admit(db, actor, run.id, _request("api-auth"))
+    with factory.begin() as db:
+        stored = db.get(QARun, run.id)
+        stored.github_head_sha = "c" * 40
+    with factory() as db:
+        with pytest.raises(ExecutionClaimRejected, match="evidence_invalid"):
+            service.claim_execution(db, admission.id, InternalExecutionCaller.QA_EXECUTION_COORDINATOR)
+        stored = db.get(QAExecutionAdmission, admission.id)
+        assert stored.state == "reserved"
+        assert stored.execution_attempt_id is None
+        assert db.get(QAExecutionCapacity, 1).active_count == 1
+
+
+def test_claim_commit_failure_rolls_back_attempt_and_state(admission_db):
+    _engine, factory = admission_db
+    actor, run, _plan = _seed_run(factory)
+    with factory() as db:
+        admission = _service().admit(db, actor, run.id, _request())
+    db = factory()
+
+    def fail_commit(_session):
+        raise RuntimeError("synthetic claim commit failure")
+
+    event.listen(db, "before_commit", fail_commit, once=True)
+    try:
+        with pytest.raises(RuntimeError, match="synthetic claim commit failure"):
+            _service().claim_execution(
+                db, admission.id, InternalExecutionCaller.QA_EXECUTION_COORDINATOR
+            )
+    finally:
+        db.close()
+    with factory() as db:
+        stored = db.get(QAExecutionAdmission, admission.id)
+        assert stored.state == "reserved"
+        assert stored.execution_attempt_id is None
+        assert stored.worker_id is None
+        assert stored.started_at is None
+        assert db.get(QAExecutionCapacity, 1).active_count == 1
